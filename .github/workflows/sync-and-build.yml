@@ -112,14 +112,16 @@ jobs:
           # 执行自动冲突解决脚本
           python3 "$GITHUB_WORKSPACE/scripts/resolve_conflicts.py" .
 
+          go mod tidy || true
           git add -A
           git commit -m "Merge vernesong/mihomo Alpha into FlClash"
           cd ..
 
-          echo "=== 3. 适配本地 Go 版本 ==="
+          echo "=== 3. 适配本地 Go 版本并更新依赖 ==="
           GO_VER=$(go version | awk '{print $3}' | sed 's/go//' | cut -d. -f1,2)
           echo "Current Go version: $GO_VER"
           go mod edit -go="$GO_VER" go.mod
+          go mod tidy
 
           echo "=== 4. 交叉编译 Windows amd64 内核 ==="
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -v -trimpath -tags=with_gvisor -ldflags="-w -s" -o "$GITHUB_WORKSPACE/dist/FlClashCore-windows-amd64.exe" ./cmd/core
