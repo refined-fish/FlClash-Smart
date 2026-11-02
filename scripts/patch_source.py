@@ -6,6 +6,7 @@ Customizes upstream chen08209/FlClash source code:
 2. Updates publisher URL and publisher name in Windows packaging config.
 3. Updates default configurations:
    - System proxy defaults to false (VPN and Network).
+   - Android VpnProps: ipv6 defaults to true, dnsHijacking defaults to true.
    - Only statistics proxy defaults to true.
    - Open logs (log capture) defaults to true.
    - Geo auto update defaults to true.
@@ -116,13 +117,20 @@ def patch_defaults(src_dir: str):
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8", newline="") as f:
             content = f.read()
-        # VpnProps systemProxy
-        content = apply_snippet_replacement(
-            content,
-            "@Default(true) bool systemProxy,\n    @Default(false) bool ipv6,",
-            "@Default(false) bool systemProxy,\n    @Default(false) bool ipv6,",
-            "Default systemProxy=false in VpnProps"
-        )
+        # VpnProps defaults (systemProxy=false, ipv6=true, dnsHijacking=true)
+        old_vpn_props = """    @Default(true) bool enable,
+    @Default(true) bool systemProxy,
+    @Default(false) bool ipv6,
+    @Default(true) bool allowBypass,
+    @Default(false) bool dnsHijacking,"""
+
+        new_vpn_props = """    @Default(true) bool enable,
+    @Default(false) bool systemProxy,
+    @Default(true) bool ipv6,
+    @Default(true) bool allowBypass,
+    @Default(true) bool dnsHijacking,"""
+        content = apply_snippet_replacement(content, old_vpn_props, new_vpn_props, "Default VpnProps (systemProxy=false, ipv6=true, dnsHijacking=true)")
+
         # NetworkProps systemProxy
         content = apply_snippet_replacement(
             content,
@@ -152,7 +160,10 @@ def patch_defaults(src_dir: str):
     if os.path.exists(config_freezed_path):
         with open(config_freezed_path, "r", encoding="utf-8", newline="") as f:
             content = f.read()
-        content = content.replace("this.systemProxy = true, this.ipv6", "this.systemProxy = false, this.ipv6")
+        content = content.replace(
+            "this.enable = true, this.systemProxy = true, this.ipv6 = false, this.allowBypass = true, this.dnsHijacking = false,",
+            "this.enable = true, this.systemProxy = false, this.ipv6 = true, this.allowBypass = true, this.dnsHijacking = true,"
+        )
         content = content.replace("this.systemProxy = true,  List<String> bypassDomain", "this.systemProxy = false,  List<String> bypassDomain")
         content = content.replace("this.onlyStatisticsProxy = false,", "this.onlyStatisticsProxy = true,")
         content = content.replace("this.openLogs = false,", "this.openLogs = true,")
@@ -166,6 +177,8 @@ def patch_defaults(src_dir: str):
         with open(config_g_path, "r", encoding="utf-8", newline="") as f:
             content = f.read()
         content = content.replace("json['systemProxy'] as bool? ?? true", "json['systemProxy'] as bool? ?? false")
+        content = content.replace("json['ipv6'] as bool? ?? false", "json['ipv6'] as bool? ?? true")
+        content = content.replace("json['dnsHijacking'] as bool? ?? false", "json['dnsHijacking'] as bool? ?? true")
         content = content.replace("json['onlyStatisticsProxy'] as bool? ?? false", "json['onlyStatisticsProxy'] as bool? ?? true")
         content = content.replace("json['openLogs'] as bool? ?? false", "json['openLogs'] as bool? ?? true")
         with open(config_g_path, "w", encoding="utf-8", newline="") as f:
