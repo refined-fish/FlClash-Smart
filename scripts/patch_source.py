@@ -50,20 +50,24 @@ import sys
 
 def apply_snippet_replacement(content: str, old_snippet: str, new_snippet: str, desc: str) -> str:
     """Replaces a snippet using exact match first, falling back to flexible whitespace regex."""
-    if old_snippet in content:
+    content_norm = content.replace("\r\n", "\n")
+    old_norm = old_snippet.replace("\r\n", "\n")
+    new_norm = new_snippet.replace("\r\n", "\n")
+
+    if old_norm in content_norm:
         print(f"  [+] Exact match applied: {desc}")
-        return content.replace(old_snippet, new_snippet)
+        return content_norm.replace(old_norm, new_norm)
 
     # Whitespace-tolerant regex fallback
-    pattern = re.escape(old_snippet)
+    pattern = re.escape(old_norm)
     pattern = re.sub(r"\\\s+", r"\\s+", pattern)
-    new_content, count = re.subn(pattern, new_snippet, content)
+    new_content, count = re.subn(pattern, new_norm, content_norm)
     if count > 0:
         print(f"  [+] Regex fallback applied: {desc}")
         return new_content
     else:
         print(f"  [!] Warning: Failed to match snippet for: {desc}")
-        return content
+        return content_norm
 
 def patch_constant_dart(src_dir: str, target_repo: str):
     path = os.path.join(src_dir, "lib", "common", "constant.dart")
@@ -1578,7 +1582,7 @@ def patch_dashboard_intranet_ip(src_dir: str):
                           size: row.icon * 0.5,
                           color: actualRunning
                               ? colorScheme.onPrimary
-                              : colors.glyph,
+                              : colorScheme.onSurfaceVariant,
                         ),
                       ),
                     if (showIcon) const SizedBox(width: 12),

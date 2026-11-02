@@ -88,8 +88,10 @@ jobs:
     if: needs.check.outputs.need_build == 'true'
     runs-on: windows-2022
     steps:
-      - name: Enable git long paths
-        run: git config --global core.longpaths true
+      - name: Enable git long paths and LF line endings
+        run: |
+          git config --global core.longpaths true
+          git config --global core.autocrlf false
 
       - name: Checkout Current Repo
         uses: actions/checkout@v4
