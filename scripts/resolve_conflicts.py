@@ -16,11 +16,22 @@ def resolve_update_geo(meta_dir: str):
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # In update_geo.go, HEAD contains the FlClash geo status notifications.
-    # Keep HEAD side for all conflicts.
-    resolved = re.sub(r'<<<<<<< HEAD\r?\n([\s\S]*?)=======\r?\n[\s\S]*?>>>>>>> [^\r\n]*\r?\n', r'\1', content)
+    # In update_geo.go, conflicts are around UpdateGeoIp and UpdateGeoSite.
+    # Keep the sendGeoUpdateStatus notifications, but do NOT include unused geoLoader.
+    geoip_conflict = r'<<<<<<< HEAD\r?\n\tsendGeoUpdateStatus\("GEOIP", true, false, nil\)\r?\n\tvar skipped bool\r?\n\tdefer func\(\) \{ sendGeoUpdateStatus\("GEOIP", false, skipped, err\) \}\(\)\r?\n\r?\n\tgeoLoader, err := geodata\.GetGeoDataLoader\("standard"\)\r?\n\r?\n=======\r?\n>>>>>>> [^\r\n]*\r?\n'
+    geoip_replace = '\tsendGeoUpdateStatus("GEOIP", true, false, nil)\n\tvar skipped bool\n\tdefer func() { sendGeoUpdateStatus("GEOIP", false, skipped, err) }()\n\n'
+    content = re.sub(geoip_conflict, geoip_replace, content)
+
+    geosite_conflict = r'<<<<<<< HEAD\r?\n\tsendGeoUpdateStatus\("GEOSITE", true, false, nil\)\r?\n\tvar skipped bool\r?\n\tdefer func\(\) \{ sendGeoUpdateStatus\("GEOSITE", false, skipped, err\) \}\(\)\r?\n\r?\n\tgeoLoader, err := geodata\.GetGeoDataLoader\("standard"\)\r?\n\r?\n=======\r?\n>>>>>>> [^\r\n]*\r?\n'
+    geosite_replace = '\tsendGeoUpdateStatus("GEOSITE", true, false, nil)\n\tvar skipped bool\n\tdefer func() { sendGeoUpdateStatus("GEOSITE", false, skipped, err) }()\n\n'
+    content = re.sub(geosite_conflict, geosite_replace, content)
+
+    # In case of any remaining conflict, keep HEAD and remove unused geoLoader declaration
+    content = re.sub(r'<<<<<<< HEAD\r?\n([\s\S]*?)=======\r?\n[\s\S]*?>>>>>>> [^\r\n]*\r?\n', r'\1', content)
+    content = re.sub(r'\tgeoLoader, err := geodata\.GetGeoDataLoader\("standard"\)\r?\n', '', content)
+
     with open(path, "w", encoding="utf-8") as f:
-        f.write(resolved)
+        f.write(content)
     print(f"[+] Resolved conflicts in {path}")
 
 def resolve_manager(meta_dir: str):
