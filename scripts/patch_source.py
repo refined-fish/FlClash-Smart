@@ -259,6 +259,14 @@ const defaultSmartModelUrl =
           : const <String, String>{},"""
         content = apply_snippet_replacement(content, old_to_update, new_to_update, "toUpdateParams geoXUrl conditional override")
 
+        old_tun = """class Tun with _$Tun {
+  const factory Tun({
+    @Default(false) bool enable,"""
+        new_tun = """class Tun with _$Tun {
+  const factory Tun({
+    @Default(true) bool enable,"""
+        content = apply_snippet_replacement(content, old_tun, new_tun, "Default Tun.enable=true in Tun")
+
         with open(clash_config_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
 
@@ -273,6 +281,8 @@ const defaultSmartModelUrl =
                                   "@JsonKey(name: 'geo-update-interval') this.geoUpdateInterval = 168,")
         content = content.replace("Set<GeneralOverrideKey> generalOverrideKeys = const {}}",
                                   "Set<GeneralOverrideKey> generalOverrideKeys = const {GeneralOverrideKey.allowLan}}")
+        content = content.replace("class _Tun implements Tun {\n  const _Tun({this.enable = false,",
+                                  "class _Tun implements Tun {\n  const _Tun({this.enable = true,")
         with open(clash_freezed_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         print("[+] Patched clash_config.freezed.dart defaults")
@@ -288,6 +298,8 @@ const defaultSmartModelUrl =
                                   "geoUpdateInterval: (json['geo-update-interval'] as num?)?.toInt() ?? 168,")
         content = content.replace("generalOverrideKeys: json['general-override-keys'] == null\n          ? const {}",
                                   "generalOverrideKeys: json['general-override-keys'] == null\n          ? const {GeneralOverrideKey.allowLan}")
+        content = content.replace("_$TunFromJson(Map<String, dynamic> json) => _Tun(\n  enable: json['enable'] as bool? ?? false,",
+                                  "_$TunFromJson(Map<String, dynamic> json) => _Tun(\n  enable: json['enable'] as bool? ?? true,")
         old_enum_map = """const _$GeneralOverrideKeyEnumMap = {
   GeneralOverrideKey.testUrl: 'test-url',
   GeneralOverrideKey.unifiedDelay: 'unified-delay',
