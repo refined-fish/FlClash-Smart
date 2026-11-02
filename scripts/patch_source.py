@@ -42,6 +42,18 @@ Customizes upstream chen08209/FlClash source code:
    - When override is ON: clicking allows editing, persisting changes even if toggle is closed.
    - Adds "Smart" section with "MODEL" resource (lgbm-url, Model.bin).
    - Updates (auto & manual) use effective URLs (adaptive to profile, override switch, defaults).
+9. Outbound Network settings ("网络设置 - 出站") "不修改" style:
+   - disableKeepAlive converted to TriOption ("不修改" / "开启" / "关闭").
+   - keepAliveIdle, keepAliveInterval, routingMark default to 0 (displays and acts as "不修改").
+   - Preserves profile outbound configuration in lib/common/task.dart.
+10. Dashboard Status block WebUI entry:
+   - Moved external controller WebUI entry from Intranet IP card to CurrentOutboundCard (non-removable Status card).
+   - Displayed as an eye-catching themed pill button with AppGlyphs.openExternal.
+11. Pre-fetch latest GEO and Model assets:
+   - Downloads latest GEOIP.metadb, ASN.mmdb, GEOIP.dat, GEOSITE.dat, Model.bin before packaging.
+   - Adds Model.bin to initGeo in controller.dart so it is extracted to homePath on first run.
+12. Android TUN authorization error fix:
+   - Skips desktop admin authorization on Android in requestAdmin and sets tun.enable=false in effectivePatchConfig.
 """
 
 import os
@@ -201,6 +213,22 @@ const defaultSmartModelUrl =
             "defaultMixedPort = 0 (unmodified)"
         )
 
+        # defaultKeepAliveInterval = 0 (unmodified)
+        content = apply_snippet_replacement(
+            content,
+            "const defaultKeepAliveInterval = 30;",
+            "const defaultKeepAliveInterval = 0;",
+            "defaultKeepAliveInterval = 0 (unmodified)"
+        )
+
+        # keepAliveIdle default to 0
+        content = apply_snippet_replacement(
+            content,
+            "@Default(15) @JsonKey(name: 'keep-alive-idle') int keepAliveIdle,",
+            "@Default(0) @JsonKey(name: 'keep-alive-idle') int keepAliveIdle,",
+            "Default keepAliveIdle=0 in PatchClashConfig"
+        )
+
         # geoAutoUpdate default to true, geoUpdateInterval default to 168
         content = apply_snippet_replacement(
             content,
@@ -279,6 +307,8 @@ const defaultSmartModelUrl =
                                   "@JsonKey(name: 'geo-auto-update') this.geoAutoUpdate = true,")
         content = content.replace("@JsonKey(name: 'geo-update-interval') this.geoUpdateInterval = 24,",
                                   "@JsonKey(name: 'geo-update-interval') this.geoUpdateInterval = 168,")
+        content = content.replace("@JsonKey(name: 'keep-alive-idle') this.keepAliveIdle = 15,",
+                                  "@JsonKey(name: 'keep-alive-idle') this.keepAliveIdle = 0,")
         content = content.replace("Set<GeneralOverrideKey> generalOverrideKeys = const {}}",
                                   "Set<GeneralOverrideKey> generalOverrideKeys = const {GeneralOverrideKey.allowLan}}")
         content = content.replace("class _Tun implements Tun {\n  const _Tun({this.enable = false,",
@@ -296,6 +326,8 @@ const defaultSmartModelUrl =
                                   "geoAutoUpdate: json['geo-auto-update'] as bool? ?? true,")
         content = content.replace("geoUpdateInterval: (json['geo-update-interval'] as num?)?.toInt() ?? 24,",
                                   "geoUpdateInterval: (json['geo-update-interval'] as num?)?.toInt() ?? 168,")
+        content = content.replace("keepAliveIdle: (json['keep-alive-idle'] as num?)?.toInt() ?? 15,",
+                                  "keepAliveIdle: (json['keep-alive-idle'] as num?)?.toInt() ?? 0,")
         content = content.replace("generalOverrideKeys: json['general-override-keys'] == null\n          ? const {}",
                                   "generalOverrideKeys: json['general-override-keys'] == null\n          ? const {GeneralOverrideKey.allowLan}")
         content = content.replace("_$TunFromJson(Map<String, dynamic> json) => _Tun(\n  enable: json['enable'] as bool? ?? false,",
@@ -317,6 +349,7 @@ const defaultSmartModelUrl =
   GeneralOverrideKey.geoXUrl: 'geox-url',
   GeneralOverrideKey.externalController: 'external-controller',
   GeneralOverrideKey.findProcessMode: 'find-process-mode',
+  GeneralOverrideKey.disableKeepAlive: 'disable-keep-alive',
 };"""
         content = apply_snippet_replacement(content, old_enum_map, new_enum_map, "Extend _$GeneralOverrideKeyEnumMap in clash_config.g.dart")
         with open(clash_g_path, "w", encoding="utf-8", newline="\n") as f:
@@ -379,7 +412,8 @@ def patch_enum_dart(src_dir: str):
   allowLan('allow-lan'),
   geoXUrl('geox-url'),
   externalController('external-controller'),
-  findProcessMode('find-process-mode');
+  findProcessMode('find-process-mode'),
+  disableKeepAlive('disable-keep-alive');
 
   const GeneralOverrideKey(this.path);
 
@@ -424,6 +458,7 @@ enum TriOption {
     GeneralOverrideKey.geoXUrl => l.geoResources,
     GeneralOverrideKey.externalController => l.externalController,
     GeneralOverrideKey.findProcessMode => l.findProcessMode,
+    GeneralOverrideKey.disableKeepAlive => l.disableKeepAlive,
   };
 }"""
         ov_content = apply_snippet_replacement(ov_content, old_label, new_label, "GeneralOverrideKey label exhaustiveness")
@@ -477,6 +512,10 @@ enum TriOption {
           (config, value) => config.copyWith(
             findProcessMode: value ? FindProcessMode.always : FindProcessMode.off,
           ),
+        ),
+        GeneralOverrideKey.disableKeepAlive => ToggleOverrideField(
+          (config) => config.disableKeepAlive,
+          (config, value) => config.copyWith(disableKeepAlive: value),
         ),
       };"""
         ov_content = apply_snippet_replacement(ov_content, old_field_tail, new_field_tail, "_GeneralOverrideSpec fieldOf exhaustiveness")
@@ -604,10 +643,18 @@ def patch_task_dart(src_dir: str):
   if (realPatchConfig.mixedPort > 0) {
     rawConfig['mixed-port'] = realPatchConfig.mixedPort;
   }
-  if (rawConfig['keep-alive-interval'] == null) rawConfig['keep-alive-interval'] = realPatchConfig.keepAliveInterval;
-  if (rawConfig['keep-alive-idle'] == null) rawConfig['keep-alive-idle'] = realPatchConfig.keepAliveIdle;
-  if (rawConfig['disable-keep-alive'] == null) rawConfig['disable-keep-alive'] = realPatchConfig.disableKeepAlive;
-  if (realPatchConfig.routingMark != 0) rawConfig['routing-mark'] = realPatchConfig.routingMark;
+  if (realPatchConfig.generalOverrideKeys.contains(GeneralOverrideKey.disableKeepAlive)) {
+    rawConfig['disable-keep-alive'] = realPatchConfig.disableKeepAlive;
+  }
+  if (realPatchConfig.keepAliveInterval > 0) {
+    rawConfig['keep-alive-interval'] = realPatchConfig.keepAliveInterval;
+  }
+  if (realPatchConfig.keepAliveIdle > 0) {
+    rawConfig['keep-alive-idle'] = realPatchConfig.keepAliveIdle;
+  }
+  if (realPatchConfig.routingMark > 0) {
+    rawConfig['routing-mark'] = realPatchConfig.routingMark;
+  }
   if (realPatchConfig.generalOverrideKeys.contains(GeneralOverrideKey.findProcessMode)) {
     rawConfig['find-process-mode'] = realPatchConfig.findProcessMode.name;
   }
@@ -1538,21 +1585,6 @@ def patch_dashboard_intranet_ip(src_dir: str):
             glyph: AppGlyphs.devices,
             title: appLocalizations.intranetIP,
             trailing: [
-              DashboardIconButton(
-                glyph: AppGlyphs.openExternal,
-                tooltip: 'Web 控制面板',
-                onPressed: () {
-                  final clashConfig = ref.read(patchClashConfigProvider);
-                  final ext = clashConfig.externalController.value;
-                  final hostPort = ext.isNotEmpty ? ext : '127.0.0.1:9090';
-                  final secret = clashConfig.secret;
-                  final query = secret.isNotEmpty ? '?secret=${Uri.encodeComponent(secret)}' : '';
-                  launchUrl(
-                    Uri.parse('http://$hostPort/ui$query'),
-                    mode: LaunchMode.externalApplication,
-                  );
-                },
-              ),
               Transform.translate(
                 offset: const Offset(8, 0),
                 child: DashboardIconButton(
@@ -2142,6 +2174,422 @@ class _SmartModelResourceItem extends ConsumerWidget {
         with open(res_action_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
 
+def patch_network_views(src_dir: str):
+    path = os.path.join(src_dir, "lib", "views", "config", "network.dart")
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        content = f.read()
+
+    # 1. Update _NumberItem to support zeroAsKeep
+    old_number_item = """class _NumberItem extends ConsumerWidget {
+  const _NumberItem({
+    required this.title,
+    required this.select,
+    required this.update,
+    this.isSeconds = false,
+    this.min = 0,
+    this.max = _maxUint32,
+  });
+
+  final ConfigLabel title;
+  final int Function(PatchClashConfig state) select;
+  final _TunUpdate<int> update;
+  final bool isSeconds;
+  final int min;
+  final int max;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final appLocalizations = context.appLocalizations;
+    final label = title(appLocalizations);
+    final value = ref.watch(patchClashConfigProvider.select(select));
+    return ListItem.input(
+      title: Text(label),
+      subtitle: Text(
+        isSeconds ? appLocalizations.secondsCount(value) : '$value',
+      ),
+      dialogTitle: label,
+      value: '$value',
+      resetValue: '${select(defaultClashConfig)}',
+      suffixText: isSeconds ? appLocalizations.seconds : null,
+      maxLength: TextInputLimits.number,
+      keyboardType: TextInputType.number,
+      validator: (value) {
+        final number = int.tryParse(value?.trim() ?? '');
+        if (number == null) {
+          return appLocalizations.numberTip(label);
+        }
+        return number < min || number > max
+            ? appLocalizations.numberRangeTip(label, '$min', '$max')
+            : null;
+      },
+      onChanged: (value) {
+        if (value == null) {
+          return;
+        }
+        ref
+            .read(patchClashConfigProvider.notifier)
+            .update((state) => update(state, int.parse(value.trim())));
+      },
+    );
+  }
+}"""
+
+    new_number_item = """class _NumberItem extends ConsumerWidget {
+  const _NumberItem({
+    required this.title,
+    required this.select,
+    required this.update,
+    this.isSeconds = false,
+    this.zeroAsKeep = false,
+    this.min = 0,
+    this.max = _maxUint32,
+  });
+
+  final ConfigLabel title;
+  final int Function(PatchClashConfig state) select;
+  final _TunUpdate<int> update;
+  final bool isSeconds;
+  final bool zeroAsKeep;
+  final int min;
+  final int max;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final appLocalizations = context.appLocalizations;
+    final label = title(appLocalizations);
+    final value = ref.watch(patchClashConfigProvider.select(select));
+    return ListItem.input(
+      title: Text(label),
+      subtitle: Text(
+        zeroAsKeep && value == 0
+            ? '不修改'
+            : (isSeconds ? appLocalizations.secondsCount(value) : '$value'),
+      ),
+      dialogTitle: label,
+      value: '$value',
+      resetValue: '${select(defaultClashConfig)}',
+      suffixText: isSeconds ? appLocalizations.seconds : null,
+      maxLength: TextInputLimits.number,
+      keyboardType: TextInputType.number,
+      validator: (value) {
+        final number = int.tryParse(value?.trim() ?? '');
+        if (number == null) {
+          return appLocalizations.numberTip(label);
+        }
+        return number < min || number > max
+            ? appLocalizations.numberRangeTip(label, '$min', '$max')
+            : null;
+      },
+      onChanged: (value) {
+        if (value == null) {
+          return;
+        }
+        ref
+            .read(patchClashConfigProvider.notifier)
+            .update((state) => update(state, int.parse(value.trim())));
+      },
+    );
+  }
+}"""
+    content = apply_snippet_replacement(content, old_number_item, new_number_item, "Update _NumberItem with zeroAsKeep")
+
+    # 2. Update outboundItems
+    old_outbound = """List<Widget> outboundItems({required bool isDesktop, required bool isLinux}) {
+  return [
+    if (isDesktop) ...[
+      ConfigToggleItem(
+        title: (l) => l.disableKeepAlive,
+        selector: patchClashConfigProvider.select(
+          (state) => state.disableKeepAlive,
+        ),
+        onChanged: _tunWriter(
+          (state, value) => state.copyWith(disableKeepAlive: value),
+        ),
+      ),
+      _NumberItem(
+        title: (l) => l.keepAliveIdle,
+        isSeconds: true,
+        select: (state) => state.keepAliveIdle,
+        update: (state, value) => state.copyWith(keepAliveIdle: value),
+      ),
+      _NumberItem(
+        title: (l) => l.keepAliveIntervalDesc,
+        isSeconds: true,
+        select: (state) => state.keepAliveInterval,
+        update: (state, value) => state.copyWith(keepAliveInterval: value),
+      ),
+    ],
+    if (isLinux)
+      _NumberItem(
+        title: (l) => l.routingMark,
+        select: (state) => state.routingMark,
+        update: (state, value) => state.copyWith(routingMark: value),
+      ),
+  ];
+}"""
+
+    new_outbound = """List<Widget> outboundItems({required bool isDesktop, required bool isLinux}) {
+  return [
+    if (isDesktop) ...[
+      ConfigOptionsItem<TriOption>(
+        title: (l) => l.disableKeepAlive,
+        options: TriOption.values,
+        textBuilder: (option) => switch (option) {
+          TriOption.keep => '不修改',
+          TriOption.enable => '开启',
+          TriOption.disable => '关闭',
+        },
+        selector: patchClashConfigProvider.select((state) {
+          if (!state.generalOverrideKeys.contains(GeneralOverrideKey.disableKeepAlive)) {
+            return TriOption.keep;
+          }
+          return state.disableKeepAlive ? TriOption.enable : TriOption.disable;
+        }),
+        onChanged: (ref, value) => ref
+            .read(patchClashConfigProvider.notifier)
+            .update((state) {
+              final keys = Set<GeneralOverrideKey>.from(state.generalOverrideKeys);
+              if (value == TriOption.keep) {
+                keys.remove(GeneralOverrideKey.disableKeepAlive);
+                return state.copyWith(generalOverrideKeys: keys);
+              } else {
+                keys.add(GeneralOverrideKey.disableKeepAlive);
+                return state.copyWith(
+                  generalOverrideKeys: keys,
+                  disableKeepAlive: value == TriOption.enable,
+                );
+              }
+            }),
+      ),
+      _NumberItem(
+        title: (l) => l.keepAliveIdle,
+        isSeconds: true,
+        zeroAsKeep: true,
+        select: (state) => state.keepAliveIdle,
+        update: (state, value) => state.copyWith(keepAliveIdle: value),
+      ),
+      _NumberItem(
+        title: (l) => l.keepAliveIntervalDesc,
+        isSeconds: true,
+        zeroAsKeep: true,
+        select: (state) => state.keepAliveInterval,
+        update: (state, value) => state.copyWith(keepAliveInterval: value),
+      ),
+    ],
+    if (isLinux)
+      _NumberItem(
+        title: (l) => l.routingMark,
+        zeroAsKeep: true,
+        select: (state) => state.routingMark,
+        update: (state, value) => state.copyWith(routingMark: value),
+      ),
+  ];
+}"""
+    content = apply_snippet_replacement(content, old_outbound, new_outbound, "outboundItems with TriOption and zeroAsKeep")
+
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(content)
+
+def patch_dashboard_current_outbound(src_dir: str):
+    path = os.path.join(src_dir, "lib", "views", "dashboard", "widgets", "current_outbound.dart")
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        content = f.read()
+
+    # 1. Add url_launcher import
+    if "import 'package:url_launcher/url_launcher.dart';" not in content:
+        content = "import 'package:url_launcher/url_launcher.dart';\n" + content
+
+    # 2. Add prominent WebUI entry button to DashboardCardHeader
+    old_header = """                      DashboardCardHeader(
+                        glyph: AppGlyphs.status,
+                        title: appLocalizations.status,
+                        leading: [
+                          DashboardChip(
+                            label: chipLabel,
+                            tone: chipTone,
+                            dot: isStart,
+                          ),
+                        ],
+                      ),"""
+
+    new_header = """                      DashboardCardHeader(
+                        glyph: AppGlyphs.status,
+                        title: appLocalizations.status,
+                        leading: [
+                          DashboardChip(
+                            label: chipLabel,
+                            tone: chipTone,
+                            dot: isStart,
+                          ),
+                        ],
+                        trailing: [
+                          Tooltip(
+                            message: 'Web 控制面板',
+                            child: Material(
+                              color: colorScheme.primary,
+                              shape: const StadiumBorder(),
+                              clipBehavior: Clip.antiAlias,
+                              child: InkWell(
+                                onTap: () {
+                                  final clashConfig = ref.read(patchClashConfigProvider);
+                                  final ext = clashConfig.externalController.value;
+                                  final hostPort = ext.isNotEmpty ? ext : '127.0.0.1:9090';
+                                  final secret = clashConfig.secret;
+                                  final query = secret.isNotEmpty ? '?secret=${Uri.encodeComponent(secret)}' : '';
+                                  launchUrl(
+                                    Uri.parse('http://$hostPort/ui$query'),
+                                    mode: LaunchMode.externalApplication,
+                                  );
+                                },
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    spacing: 4,
+                                    children: [
+                                      GlyphIcon(
+                                        AppGlyphs.openExternal,
+                                        size: 13,
+                                        color: colorScheme.onPrimary,
+                                      ),
+                                      Text(
+                                        'Web 控制台',
+                                        style: TextStyle(
+                                          color: colorScheme.onPrimary,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          height: 1.1,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),"""
+    content = apply_snippet_replacement(content, old_header, new_header, "CurrentOutboundCard WebUI header entry")
+
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(content)
+
+def patch_setup_actions(src_dir: str):
+    path = os.path.join(src_dir, "lib", "providers", "actions", "setup.dart")
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        content = f.read()
+
+    # 1. requestAdmin: skip on Android
+    old_req = """  @visibleForTesting
+  Future<bool> requestAdmin(bool enableTun) async {
+    if (!enableTun || ref.read(safeModeProvider)) {
+      return true;
+    }"""
+
+    new_req = """  @visibleForTesting
+  Future<bool> requestAdmin(bool enableTun) async {
+    if (system.isAndroid || !enableTun || ref.read(safeModeProvider)) {
+      return true;
+    }"""
+    content = apply_snippet_replacement(content, old_req, new_req, "Skip requestAdmin on Android")
+
+    # 2. _effectivePatchConfig: tun.enable false on Android
+    old_eff = """    final authorized =
+        ref.read(authorizedTunEnableProvider) ==
+        TunAuthorizationState.authorized;
+    return patchConfig.copyWith(
+      tun: patchConfig.tun.copyWith(
+        enable: patchConfig.tun.enable && authorized,
+      ),"""
+
+    new_eff = """    final authorized =
+        ref.read(authorizedTunEnableProvider) ==
+        TunAuthorizationState.authorized;
+    return patchConfig.copyWith(
+      tun: patchConfig.tun.copyWith(
+        enable: !system.isAndroid && patchConfig.tun.enable && authorized,
+      ),"""
+    content = apply_snippet_replacement(content, old_eff, new_eff, "effectivePatchConfig tun.enable=false on Android")
+
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(content)
+
+def patch_controller_dart(src_dir: str):
+    path = os.path.join(src_dir, "lib", "core", "controller.dart")
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        content = f.read()
+
+    old_geo_list = "    const geoFileNameList = [MMDB, GEOIP, GEOSITE, ASN];"
+    new_geo_list = "    const geoFileNameList = [MMDB, GEOIP, GEOSITE, ASN, 'Model.bin'];"
+    content = apply_snippet_replacement(content, old_geo_list, new_geo_list, "Add Model.bin to initGeo")
+
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(content)
+
+def update_bundled_assets(src_dir: str):
+    if os.environ.get("SKIP_ASSET_DOWNLOAD") == "1":
+        print("  [*] Skipping asset download (SKIP_ASSET_DOWNLOAD=1)")
+        return
+    import urllib.request
+    assets_dir = os.path.join(src_dir, "assets", "data")
+    if not os.path.exists(assets_dir):
+        os.makedirs(assets_dir, exist_ok=True)
+
+    files_to_fetch = {
+        "ASN.mmdb": [
+            "https://v6.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb",
+        ],
+        "GEOIP.dat": [
+            "https://v6.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat",
+        ],
+        "GEOIP.metadb": [
+            "https://v6.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb",
+        ],
+        "GEOSITE.dat": [
+            "https://v6.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat",
+        ],
+        "Model.bin": [
+            "https://v6.gh-proxy.org/https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin",
+            "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin",
+        ],
+    }
+
+    print("[*] Updating bundled GEO and Smart Model assets in assets/data/...", flush=True)
+    for filename, urls in files_to_fetch.items():
+        out_path = os.path.join(assets_dir, filename)
+        success = False
+        for url in urls:
+            try:
+                print(f"  [-] Downloading {filename} from {url}...", flush=True)
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = resp.read()
+                    if len(data) > 1024:
+                        with open(out_path, "wb") as f:
+                            f.write(data)
+                        print(f"  [+] Saved {filename} ({len(data)} bytes)", flush=True)
+                        success = True
+                        break
+            except Exception as e:
+                print(f"  [!] Failed {url}: {e}", flush=True)
+        if not success:
+            if os.path.exists(out_path):
+                print(f"  [*] Retained existing {filename}", flush=True)
+            else:
+                print(f"  [!] Warning: Could not download {filename} and no existing file exists", flush=True)
+
 def main():
     src_dir = sys.argv[1] if len(sys.argv) > 1 else "."
     target_repo = sys.argv[2] if len(sys.argv) > 2 else "refined-fish/FlClash-Smart"
@@ -2157,8 +2605,13 @@ def main():
     patch_widgets_config_item(src_dir)
     patch_proxy_helpers(src_dir)
     patch_general_views(src_dir)
+    patch_network_views(src_dir)
     patch_dashboard_intranet_ip(src_dir)
+    patch_dashboard_current_outbound(src_dir)
     patch_resources_view(src_dir)
+    patch_setup_actions(src_dir)
+    patch_controller_dart(src_dir)
+    update_bundled_assets(src_dir)
     print("[+] Source patching complete!")
 
 if __name__ == "__main__":
