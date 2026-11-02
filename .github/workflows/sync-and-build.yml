@@ -1,0 +1,202 @@
+name: Sync & Build FlClash Smart
+
+on:
+  schedule:
+    # 每天每 6 小时自动检测一次
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: '是否强制重新构建（即使该版本 Release 已存在）'
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/**'
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-build:
+    name: Check, Build & Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Current Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Check Upstream Releases
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+
+          # 1. 获取 FlClash 官方最新 Release Tag
+          UPSTREAM_TAG=$(gh api repos/chen08209/FlClash/releases/latest --jq .tag_name)
+          echo "Upstream FlClash Tag: $UPSTREAM_TAG"
+
+          # 2. 获取 vernesong Smart 内核版本信息 (特殊覆盖式 Prerelease-Alpha)
+          SMART_VERSION=$(curl -sL https://github.com/vernesong/mihomo/releases/download/Prerelease-Alpha/version.txt | tr -d '[:space:]' || true)
+          echo "Smart Version: $SMART_VERSION"
+
+          # 提取 commit hash
+          SMART_COMMIT=$(echo "$SMART_VERSION" | grep -oE '[0-9a-f]{7,}' | head -n 1 || true)
+          if [ -z "$SMART_COMMIT" ]; then
+            echo "Failed to parse commit from version.txt, fallback to vernesong/mihomo Alpha commit..."
+            SMART_COMMIT=$(gh api repos/vernesong/mihomo/commits/Alpha --jq '.sha[0:7]')
+            SMART_VERSION="alpha-smart-${SMART_COMMIT}"
+          fi
+          echo "Smart Commit SHA: $SMART_COMMIT"
+
+          # 3. 构造专属 Release Tag
+          TARGET_TAG="${UPSTREAM_TAG}-smart-${SMART_COMMIT}"
+          echo "Target Release Tag: $TARGET_TAG"
+
+          # 4. 检测当前仓库中是否已存在该 Release
+          EXISTS=$(gh release view "$TARGET_TAG" --json tagName --jq .tagName 2>/dev/null || true)
+          FORCE="${{ github.event.inputs.force_build }}"
+
+          if [ "$EXISTS" = "$TARGET_TAG" ] && [ "$FORCE" != "true" ]; then
+            echo "Release $TARGET_TAG already exists and force_build is false. Skipping build."
+            echo "need_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "need_build=true" >> $GITHUB_OUTPUT
+            echo "target_tag=$TARGET_TAG" >> $GITHUB_OUTPUT
+            echo "upstream_tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+            echo "smart_version=$SMART_VERSION" >> $GITHUB_OUTPUT
+            echo "smart_commit=$SMART_COMMIT" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Smart Core (amd64 & arm64)
+        if: steps.check.outputs.need_build == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.check.outputs.upstream_tag }}
+          SMART_COMMIT: ${{ steps.check.outputs.smart_commit }}
+        run: |
+          set -e
+          mkdir -p dist
+
+          echo "=== 1. 克隆 FlClash 源码 (${UPSTREAM_TAG}) ==="
+          git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/chen08209/FlClash.git flclash
+
+          echo "=== 2. 克隆与合并 Clash.Meta 核心 ==="
+          cd flclash/core
+          # 克隆 chen08209/Clash.Meta 的 FlClash 分支
+          git clone --depth 50 --branch FlClash https://github.com/chen08209/Clash.Meta.git Clash.Meta
+
+          cd Clash.Meta
+          git remote add vernesong https://github.com/vernesong/mihomo.git
+          git fetch --depth 50 vernesong Alpha
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 尝试合并 vernesong 的 Smart 分支
+          git merge --no-commit --no-ff vernesong/Alpha || true
+
+          # 执行自动冲突解决脚本
+          python3 "$GITHUB_WORKSPACE/scripts/resolve_conflicts.py" .
+
+          git add -A
+          git commit -m "Merge vernesong/mihomo Alpha into FlClash"
+          cd ..
+
+          echo "=== 3. 适配本地 Go 版本 ==="
+          GO_VER=$(go version | awk '{print $3}' | sed 's/go//' | cut -d. -f1,2)
+          echo "Current Go version: $GO_VER"
+          go mod edit -go="$GO_VER" go.mod
+
+          echo "=== 4. 交叉编译 Windows amd64 内核 ==="
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -v -trimpath -tags=with_gvisor -ldflags="-w -s" -o "$GITHUB_WORKSPACE/dist/FlClashCore-windows-amd64.exe" ./cmd/core
+
+          echo "=== 5. 交叉编译 Windows arm64 内核 ==="
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -v -trimpath -tags=with_gvisor -ldflags="-w -s" -o "$GITHUB_WORKSPACE/dist/FlClashCore-windows-arm64.exe" ./cmd/core
+
+          cd "$GITHUB_WORKSPACE"
+          ls -lh dist/
+
+      - name: Repackage Official Windows Releases
+        if: steps.check.outputs.need_build == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.check.outputs.upstream_tag }}
+        run: |
+          set -e
+          UPSTREAM_VER="${UPSTREAM_TAG#v}"
+          echo "Packaging FlClash Smart for version $UPSTREAM_VER..."
+
+          # --- Windows AMD64 ---
+          ZIP_AMD64="FlClash-${UPSTREAM_VER}-windows-amd64.zip"
+          echo "Downloading $ZIP_AMD64 from upstream..."
+          if curl -sLfO "https://github.com/chen08209/FlClash/releases/download/${UPSTREAM_TAG}/${ZIP_AMD64}"; then
+            mkdir -p work_amd64
+            unzip -q "$ZIP_AMD64" -d work_amd64
+            cp -f dist/FlClashCore-windows-amd64.exe work_amd64/FlClashCore.exe
+            OUT_ZIP_AMD64="FlClash-${UPSTREAM_VER}-windows-amd64-smart.zip"
+            (cd work_amd64 && zip -q -r "$GITHUB_WORKSPACE/dist/$OUT_ZIP_AMD64" .)
+            echo "Successfully created $OUT_ZIP_AMD64"
+          else
+            echo "Warning: Official $ZIP_AMD64 not found."
+          fi
+
+          # --- Windows ARM64 ---
+          ZIP_ARM64="FlClash-${UPSTREAM_VER}-windows-arm64.zip"
+          echo "Downloading $ZIP_ARM64 from upstream..."
+          if curl -sLfO "https://github.com/chen08209/FlClash/releases/download/${UPSTREAM_TAG}/${ZIP_ARM64}"; then
+            mkdir -p work_arm64
+            unzip -q "$ZIP_ARM64" -d work_arm64
+            cp -f dist/FlClashCore-windows-arm64.exe work_arm64/FlClashCore.exe
+            OUT_ZIP_ARM64="FlClash-${UPSTREAM_VER}-windows-arm64-smart.zip"
+            (cd work_arm64 && zip -q -r "$GITHUB_WORKSPACE/dist/$OUT_ZIP_ARM64" .)
+            echo "Successfully created $OUT_ZIP_ARM64"
+          else
+            echo "Warning: Official $ZIP_ARM64 not found."
+          fi
+
+          # 生成 SHA256 校验清单
+          cd "$GITHUB_WORKSPACE/dist"
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.need_build == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.check.outputs.target_tag }}
+          name: FlClash ${{ steps.check.outputs.upstream_tag }} (Smart Core ${{ steps.check.outputs.smart_commit }})
+          body: |
+            ## FlClash Smart Release
+
+            此版本基于上游官方 [chen08209/FlClash](https://github.com/chen08209/FlClash) **${{ steps.check.outputs.upstream_tag }}**。
+            已通过 GitHub Actions 自动交叉编译并将内置内核替换为 **vernesong Smart 内核**（智能策略组 / Smart Group 支持）。
+
+            ### 📦 版本信息
+            - **FlClash 上游版本**: `${{ steps.check.outputs.upstream_tag }}`
+            - **Smart 内核版本**: `${{ steps.check.outputs.smart_version }}` (Commit `${{ steps.check.outputs.smart_commit }}`)
+            - **内核特性**: 支持 `type: smart` 策略组、LightGBM 模型、智能动态权衡选路
+
+            ### 🚀 使用指南
+            * **完整便携版（开箱即用，推荐）**：
+              下载 `FlClash-*-windows-amd64-smart.zip`（或 arm64），解压到任意文件夹即可直接运行 `FlClash.exe`。
+            * **已有客户端替换内核**：
+              下载 `FlClashCore-windows-*.exe`，重命名为 `FlClashCore.exe` 并覆盖替换原安装目录下的内核文件。
+
+            ### 🔒 文件校验 (SHA256)
+            详见附件 `SHA256SUMS.txt`。
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
