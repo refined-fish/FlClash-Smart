@@ -2,8 +2,8 @@ name: Sync & Build FlClash Smart
 
 on:
   schedule:
-    # 每天每 6 小时自动检测一次
-    - cron: '0 */6 * * *'
+    # 每天定时检测一次（每 24 小时，UTC 00:00 即北京时间 08:00）
+    - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       force_build:
@@ -20,24 +20,25 @@ on:
 permissions:
   contents: write
 
+env:
+  FLUTTER_VERSION: '3.47.6'
+  GO_VERSION: '1.27.1'
+  NDK_VERSION: r28c
+
 jobs:
-  check-and-build:
-    name: Check, Build & Release
+  check:
+    name: Check Upstream Updates
     runs-on: ubuntu-latest
+    outputs:
+      need_build: ${{ steps.check.outputs.need_build }}
+      target_tag: ${{ steps.check.outputs.target_tag }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+      smart_version: ${{ steps.check.outputs.smart_version }}
+      smart_commit: ${{ steps.check.outputs.smart_commit }}
 
     steps:
       - name: Checkout Current Repo
         uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
 
       - name: Check Upstream Releases
         id: check
@@ -50,29 +51,28 @@ jobs:
           UPSTREAM_TAG=$(gh api repos/chen08209/FlClash/releases/latest --jq .tag_name)
           echo "Upstream FlClash Tag: $UPSTREAM_TAG"
 
-          # 2. 获取 vernesong Smart 内核版本信息 (特殊覆盖式 Prerelease-Alpha)
+          # 2. 获取 vernesong Smart 内核版本 (覆盖式发布的 Prerelease-Alpha)
           SMART_VERSION=$(curl -sL https://github.com/vernesong/mihomo/releases/download/Prerelease-Alpha/version.txt | tr -d '[:space:]' || true)
           echo "Smart Version: $SMART_VERSION"
 
-          # 提取 commit hash
           SMART_COMMIT=$(echo "$SMART_VERSION" | grep -oE '[0-9a-f]{7,}' | head -n 1 || true)
           if [ -z "$SMART_COMMIT" ]; then
-            echo "Failed to parse commit from version.txt, fallback to vernesong/mihomo Alpha commit..."
+            echo "Fallback: Querying vernesong/mihomo Alpha commit via API..."
             SMART_COMMIT=$(gh api repos/vernesong/mihomo/commits/Alpha --jq '.sha[0:7]')
             SMART_VERSION="alpha-smart-${SMART_COMMIT}"
           fi
           echo "Smart Commit SHA: $SMART_COMMIT"
 
-          # 3. 构造专属 Release Tag
+          # 3. 构造组合版本 Tag
           TARGET_TAG="${UPSTREAM_TAG}-smart-${SMART_COMMIT}"
           echo "Target Release Tag: $TARGET_TAG"
 
-          # 4. 检测当前仓库中是否已存在该 Release
+          # 4. 判断是否已存在该版本的 Release
           EXISTS=$(gh release view "$TARGET_TAG" --json tagName --jq .tagName 2>/dev/null || true)
           FORCE="${{ github.event.inputs.force_build }}"
 
           if [ "$EXISTS" = "$TARGET_TAG" ] && [ "$FORCE" != "true" ]; then
-            echo "Release $TARGET_TAG already exists and force_build is false. Skipping build."
+            echo "Release $TARGET_TAG already exists and force_build is false. Skipping."
             echo "need_build=false" >> $GITHUB_OUTPUT
           else
             echo "need_build=true" >> $GITHUB_OUTPUT
@@ -82,120 +82,274 @@ jobs:
             echo "smart_commit=$SMART_COMMIT" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build Smart Core (amd64 & arm64)
-        if: steps.check.outputs.need_build == 'true'
+  build-windows:
+    name: Build Windows (Setup & Portable)
+    needs: check
+    if: needs.check.outputs.need_build == 'true'
+    runs-on: windows-2022
+    steps:
+      - name: Enable git long paths
+        run: git config --global core.longpaths true
+
+      - name: Checkout Current Repo
+        uses: actions/checkout@v4
+
+      - name: Add Inno Setup to PATH
+        shell: bash
+        run: echo "C:/Program Files (x86)/Inno Setup 6" >> $GITHUB_PATH
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Clone and Patch FlClash
+        shell: bash
         env:
-          UPSTREAM_TAG: ${{ steps.check.outputs.upstream_tag }}
-          SMART_COMMIT: ${{ steps.check.outputs.smart_commit }}
+          UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
         run: |
-          set -e
-          mkdir -p dist
-
-          echo "=== 1. 克隆 FlClash 源码 (${UPSTREAM_TAG}) ==="
           git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/chen08209/FlClash.git flclash
+          # 修改客户端内更新监听地址为 refined-fish/FlClash-Smart
+          python scripts/patch_source.py flclash refined-fish/FlClash-Smart
 
-          echo "=== 2. 克隆与合并 Clash.Meta 核心 ==="
+      - name: Integrate Smart Core
+        shell: bash
+        run: |
           cd flclash/core
-          # 克隆 chen08209/Clash.Meta 的 FlClash 分支
           git clone --depth 50 --branch FlClash https://github.com/chen08209/Clash.Meta.git Clash.Meta
-
           cd Clash.Meta
           git remote add vernesong https://github.com/vernesong/mihomo.git
           git fetch --depth 50 vernesong Alpha
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # 尝试合并 vernesong 的 Smart 分支
           git merge --no-commit --no-ff vernesong/Alpha || true
-
-          # 执行自动冲突解决脚本
-          python3 "$GITHUB_WORKSPACE/scripts/resolve_conflicts.py" .
-
+          python "$GITHUB_WORKSPACE/scripts/resolve_conflicts.py" .
           go mod tidy || true
           git add -A
           git commit -m "Merge vernesong/mihomo Alpha into FlClash"
           cd ..
-
-          echo "=== 3. 适配本地 Go 版本并更新依赖 ==="
           GO_VER=$(go version | awk '{print $3}' | sed 's/go//' | cut -d. -f1,2)
-          echo "Current Go version: $GO_VER"
           go mod edit -go="$GO_VER" go.mod
           go mod tidy
 
-          echo "=== 4. 交叉编译 Windows amd64 内核 ==="
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -v -trimpath -tags=with_gvisor -ldflags="-w -s" -o "$GITHUB_WORKSPACE/dist/FlClashCore-windows-amd64.exe" ./cmd/core
+      - name: Fetch CA certificates
+        shell: bash
+        run: |
+          bundle=flclash/core/Clash.Meta/component/ca/ca-certificates.crt
+          mkdir -p $(dirname "$bundle")
+          curl -fsSL --retry 3 -o "$bundle" "https://curl.se/ca/cacert-2026-09-25.pem"
 
-          echo "=== 5. 交叉编译 Windows arm64 内核 ==="
-          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -v -trimpath -tags=with_gvisor -ldflags="-w -s" -o "$GITHUB_WORKSPACE/dist/FlClashCore-windows-arm64.exe" ./cmd/core
+      - name: Get Flutter Dependencies
+        shell: bash
+        run: |
+          cd flclash
+          flutter pub get
 
-          cd "$GITHUB_WORKSPACE"
+      - name: Build Windows Packages (Setup .exe & Portable .zip)
+        shell: bash
+        run: |
+          cd flclash
+          dart setup.dart windows --env stable -v
+
+      - name: Collect Windows Artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp -r flclash/dist/* dist/
+          # 提取单独的 FlClashCore.exe 方便已有用户直接替换
+          if [ -f flclash/libclash/windows/FlClashCore.exe ]; then
+            cp flclash/libclash/windows/FlClashCore.exe dist/FlClashCore-windows-amd64.exe
+          fi
           ls -lh dist/
 
-      - name: Repackage Official Windows Releases
-        if: steps.check.outputs.need_build == 'true'
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-assets
+          path: dist/
+
+  build-android:
+    name: Build Android (APKs)
+    needs: check
+    if: needs.check.outputs.need_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Current Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: build-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+          link-to-sdk: true
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Clone and Patch FlClash
+        shell: bash
         env:
-          UPSTREAM_TAG: ${{ steps.check.outputs.upstream_tag }}
+          UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
         run: |
-          set -e
-          UPSTREAM_VER="${UPSTREAM_TAG#v}"
-          echo "Packaging FlClash Smart for version $UPSTREAM_VER..."
+          git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/chen08209/FlClash.git flclash
+          # 修改客户端内更新监听地址为 refined-fish/FlClash-Smart
+          python3 scripts/patch_source.py flclash refined-fish/FlClash-Smart
 
-          # --- Windows AMD64 ---
-          ZIP_AMD64="FlClash-${UPSTREAM_VER}-windows-amd64.zip"
-          echo "Downloading $ZIP_AMD64 from upstream..."
-          if curl -sLfO "https://github.com/chen08209/FlClash/releases/download/${UPSTREAM_TAG}/${ZIP_AMD64}"; then
-            mkdir -p work_amd64
-            unzip -q "$ZIP_AMD64" -d work_amd64
-            cp -f dist/FlClashCore-windows-amd64.exe work_amd64/FlClashCore.exe
-            OUT_ZIP_AMD64="FlClash-${UPSTREAM_VER}-windows-amd64-smart.zip"
-            (cd work_amd64 && zip -q -r "$GITHUB_WORKSPACE/dist/$OUT_ZIP_AMD64" .)
-            echo "Successfully created $OUT_ZIP_AMD64"
-          else
-            echo "Warning: Official $ZIP_AMD64 not found."
-          fi
+      - name: Setup Android Signing
+        shell: bash
+        run: |
+          cp scripts/release.jks flclash/android/app/keystore.jks
+          cat <<EOF > flclash/android/local.properties
+          sdk.dir=$ANDROID_HOME
+          keyAlias=flclash
+          storePassword=flclash123
+          keyPassword=flclash123
+          EOF
 
-          # --- Windows ARM64 ---
-          ZIP_ARM64="FlClash-${UPSTREAM_VER}-windows-arm64.zip"
-          echo "Downloading $ZIP_ARM64 from upstream..."
-          if curl -sLfO "https://github.com/chen08209/FlClash/releases/download/${UPSTREAM_TAG}/${ZIP_ARM64}"; then
-            mkdir -p work_arm64
-            unzip -q "$ZIP_ARM64" -d work_arm64
-            cp -f dist/FlClashCore-windows-arm64.exe work_arm64/FlClashCore.exe
-            OUT_ZIP_ARM64="FlClash-${UPSTREAM_VER}-windows-arm64-smart.zip"
-            (cd work_arm64 && zip -q -r "$GITHUB_WORKSPACE/dist/$OUT_ZIP_ARM64" .)
-            echo "Successfully created $OUT_ZIP_ARM64"
-          else
-            echo "Warning: Official $ZIP_ARM64 not found."
-          fi
+      - name: Integrate Smart Core
+        shell: bash
+        run: |
+          cd flclash/core
+          git clone --depth 50 --branch FlClash https://github.com/chen08209/Clash.Meta.git Clash.Meta
+          cd Clash.Meta
+          git remote add vernesong https://github.com/vernesong/mihomo.git
+          git fetch --depth 50 vernesong Alpha
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git merge --no-commit --no-ff vernesong/Alpha || true
+          python3 "$GITHUB_WORKSPACE/scripts/resolve_conflicts.py" .
+          go mod tidy || true
+          git add -A
+          git commit -m "Merge vernesong/mihomo Alpha into FlClash"
+          cd ..
+          GO_VER=$(go version | awk '{print $3}' | sed 's/go//' | cut -d. -f1,2)
+          go mod edit -go="$GO_VER" go.mod
+          go mod tidy
 
-          # 生成 SHA256 校验清单
-          cd "$GITHUB_WORKSPACE/dist"
+      - name: Fetch CA certificates
+        shell: bash
+        run: |
+          bundle=flclash/core/Clash.Meta/component/ca/ca-certificates.crt
+          mkdir -p $(dirname "$bundle")
+          curl -fsSL --retry 3 -o "$bundle" "https://curl.se/ca/cacert-2026-09-25.pem"
+
+      - name: Get Flutter Dependencies
+        shell: bash
+        run: |
+          cd flclash
+          flutter pub get
+
+      - name: Build Android Packages
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.build-ndk.outputs.ndk-path }}
+        run: |
+          cd flclash
+          dart setup.dart android --env stable -v
+
+      - name: Collect Android Artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp -r flclash/dist/* dist/
+          ls -lh dist/
+
+      - name: Upload Android Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-assets
+          path: dist/
+
+  release:
+    name: Publish GitHub Release
+    needs: [check, build-windows, build-android]
+    if: always() && needs.check.outputs.need_build == 'true' && (needs.build-windows.result == 'success' || needs.build-android.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          pattern: '*-assets'
+          merge-multiple: true
+
+      - name: Generate Checksums
+        shell: bash
+        run: |
+          cd dist
+          find . -mindepth 2 -type f -exec mv -t . {} + 2>/dev/null || true
+          find . -mindepth 1 -type d -empty -delete 2>/dev/null || true
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Create GitHub Release
-        if: steps.check.outputs.need_build == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.check.outputs.target_tag }}
-          name: FlClash ${{ steps.check.outputs.upstream_tag }} (Smart Core ${{ steps.check.outputs.smart_commit }})
+          tag_name: ${{ needs.check.outputs.target_tag }}
+          name: FlClash ${{ needs.check.outputs.upstream_tag }} (Smart Core ${{ needs.check.outputs.smart_commit }})
           body: |
             ## FlClash Smart Release
 
-            此版本基于上游官方 [chen08209/FlClash](https://github.com/chen08209/FlClash) **${{ steps.check.outputs.upstream_tag }}**。
-            已通过 GitHub Actions 自动交叉编译并将内置内核替换为 **vernesong Smart 内核**（智能策略组 / Smart Group 支持）。
+            此版本基于上游官方 [chen08209/FlClash](https://github.com/chen08209/FlClash) **${{ needs.check.outputs.upstream_tag }}**。
+            已通过 GitHub Actions 全自动交叉编译，并将内置内核替换为 **vernesong Smart 内核**（智能策略组 / Smart Group 支持）。
+            
+            已将客户端内部的更新地址原生修改为监听本仓库 **refined-fish/FlClash-Smart**，后续有新版本发布时，客户端可直接检测并下载更新！
 
             ### 📦 版本信息
-            - **FlClash 上游版本**: `${{ steps.check.outputs.upstream_tag }}`
-            - **Smart 内核版本**: `${{ steps.check.outputs.smart_version }}` (Commit `${{ steps.check.outputs.smart_commit }}`)
-            - **内核特性**: 支持 `type: smart` 策略组、LightGBM 模型、智能动态权衡选路
+            - **FlClash 上游版本**: `${{ needs.check.outputs.upstream_tag }}`
+            - **Smart 内核版本**: `${{ needs.check.outputs.smart_version }}` (Commit `${{ needs.check.outputs.smart_commit }}`)
+            - **内核特性**: 支持 `type: smart` 策略组、LightGBM 机器学习模型、智能动态优选线路
 
-            ### 🚀 使用指南
-            * **完整便携版（开箱即用，推荐）**：
-              下载 `FlClash-*-windows-amd64-smart.zip`（或 arm64），解压到任意文件夹即可直接运行 `FlClash.exe`。
-            * **已有客户端替换内核**：
-              下载 `FlClashCore-windows-*.exe`，重命名为 `FlClashCore.exe` 并覆盖替换原安装目录下的内核文件。
+            ### 🚀 安装与下载指南
+            * **Windows 用户**：
+              - **安装包（直接安装运行）**：下载 `FlClash-*-windows-amd64-setup.exe`，双击即可直接安装并启动。
+              - **便携版**：下载 `FlClash-*-windows-amd64.zip`，解压即可运行。
+            * **Android 用户**：
+              - **主流 64 位手机（推荐）**：下载并安装 `FlClash-*-android-arm64-v8a.apk`。
+              - **32 位老旧设备**：下载 `FlClash-*-android-armeabi-v7a.apk`。
+              - **电脑模拟器/平板 (x86_64)**：下载 `FlClash-*-android-x86_64.apk`。
+            * **已有客户端单独替换内核**：
+              - 可直接下载 `FlClashCore-windows-amd64.exe`，重命名为 `FlClashCore.exe` 并替换现有安装目录中的文件。
 
             ### 🔒 文件校验 (SHA256)
             详见附件 `SHA256SUMS.txt`。
