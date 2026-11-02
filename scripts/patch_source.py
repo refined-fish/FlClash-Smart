@@ -248,12 +248,12 @@ const defaultSmartModelUrl =
   }"""
         content = apply_snippet_replacement(content, old_secret_fn, new_secret_fn, "Never wipe or auto-generate secret")
 
-        # toUpdateParams: send geoXUrl if overridden, otherwise profile/default
+        # toUpdateParams: send geoXUrl if overridden, otherwise empty map (core uses profile/task config)
         old_to_update = "geoXUrl: geoXUrl.raw,"
         new_to_update = """geoXUrl: generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl)
           ? geoXUrl.raw
-          : (globalState.profileGeoXUrl.value ?? defaultGeoXUrl.map((k, v) => MapEntry(k.name, v))),"""
-        content = apply_snippet_replacement(content, old_to_update, new_to_update, "toUpdateParams geoXUrl adaptive override")
+          : const <String, String>{},"""
+        content = apply_snippet_replacement(content, old_to_update, new_to_update, "toUpdateParams geoXUrl conditional override")
 
         with open(clash_config_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
@@ -783,6 +783,8 @@ def patch_proxy_helpers(src_dir: str):
     if os.path.exists(http_path):
         with open(http_path, "r", encoding="utf-8", newline="") as f:
             content = f.read()
+        if "package:fl_clash/state.dart" not in content:
+            content = "import 'package:fl_clash/state.dart';\n" + content
         old_http = """    final mixedPort = read(
       patchClashConfigProvider.select((state) => state.mixedPort),
     );
@@ -806,7 +808,17 @@ def patch_proxy_helpers(src_dir: str):
         with open(http_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
 
-    # 2. lib/providers/state/proxies.dart
+    # 2. lib/providers/state.dart (imports package:fl_clash/state.dart so proxies.dart & system.dart have globalState)
+    state_hub_path = os.path.join(src_dir, "lib", "providers", "state.dart")
+    if os.path.exists(state_hub_path):
+        with open(state_hub_path, "r", encoding="utf-8", newline="") as f:
+            content = f.read()
+        if "package:fl_clash/state.dart" not in content:
+            content = "import 'package:fl_clash/state.dart';\n" + content
+        with open(state_hub_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+    # 3. lib/providers/state/proxies.dart
     proxies_path = os.path.join(src_dir, "lib", "providers", "state", "proxies.dart")
     if os.path.exists(proxies_path):
         with open(proxies_path, "r", encoding="utf-8", newline="") as f:
@@ -834,7 +846,7 @@ def patch_proxy_helpers(src_dir: str):
         with open(proxies_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
 
-    # 3. lib/providers/state/system.dart
+    # 4. lib/providers/state/system.dart
     sys_path = os.path.join(src_dir, "lib", "providers", "state", "system.dart")
     if os.path.exists(sys_path):
         with open(sys_path, "r", encoding="utf-8", newline="") as f:
@@ -858,7 +870,7 @@ def patch_proxy_helpers(src_dir: str):
         with open(sys_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
 
-    # 4. lib/providers/actions/system.dart
+    # 5. lib/providers/actions/system.dart
     sys_act_path = os.path.join(src_dir, "lib", "providers", "actions", "system.dart")
     if os.path.exists(sys_act_path):
         with open(sys_act_path, "r", encoding="utf-8", newline="") as f:
@@ -884,11 +896,13 @@ def patch_proxy_helpers(src_dir: str):
         with open(sys_act_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
 
-    # 5. lib/views/dashboard/widgets/network_takeover.dart
+    # 6. lib/views/dashboard/widgets/network_takeover.dart
     takeover_path = os.path.join(src_dir, "lib", "views", "dashboard", "widgets", "network_takeover.dart")
     if os.path.exists(takeover_path):
         with open(takeover_path, "r", encoding="utf-8", newline="") as f:
             content = f.read()
+        if "package:fl_clash/state.dart" not in content:
+            content = "import 'package:fl_clash/state.dart';\n" + content
         old_on = """    final on = systemProxy
         ? appLocalizations.portValue(
             ref.watch(
@@ -1274,11 +1288,13 @@ def patch_dashboard_intranet_ip(src_dir: str):
     with open(path, "r", encoding="utf-8", newline="") as f:
         content = f.read()
 
-    # Import url_launcher and state if not present
+    # Import url_launcher, state, and material_new_shapes if not present
     if "package:url_launcher/url_launcher.dart" not in content:
         content = "import 'package:url_launcher/url_launcher.dart';\n" + content
     if "package:fl_clash/state.dart" not in content:
         content = "import 'package:fl_clash/state.dart';\n" + content
+    if "package:material_new_shapes/material_new_shapes.dart" not in content:
+        content = "import 'package:material_new_shapes/material_new_shapes.dart';\n" + content
 
     old_body = """    final localIp = ref.watch(localIpProvider);
     final allowLan = ref.watch(
@@ -1390,6 +1406,7 @@ def patch_dashboard_intranet_ip(src_dir: str):
     );"""
 
     new_body = """    final localIp = ref.watch(localIpProvider);
+    final colors = DashboardColors.of(context);
     final isAllowLanOverridden = ref.watch(
       patchClashConfigProvider.select(
         (state) => state.generalOverrideKeys.contains(GeneralOverrideKey.allowLan),
@@ -1437,23 +1454,23 @@ def patch_dashboard_intranet_ip(src_dir: str):
     Future<void> showAllowLanMenu() async {
       final selected = await dialogs.showCommonDialog<TriOption>(
         child: CommonDialog(
-          title: Text(appLocalizations.allowLan),
+          title: appLocalizations.allowLan,
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 16),
           child: Wrap(
             children: [
               ListItem(
                 title: const Text('开启'),
-                trailing: allowLanMode == TriOption.enable ? const CommonIcon(glyph: AppGlyphs.check, size: 20) : null,
+                trailing: allowLanMode == TriOption.enable ? GlyphIcon(AppGlyphs.check, size: 20) : null,
                 onTap: () => Navigator.of(context).pop(TriOption.enable),
               ),
               ListItem(
                 title: const Text('关闭'),
-                trailing: allowLanMode == TriOption.disable ? const CommonIcon(glyph: AppGlyphs.check, size: 20) : null,
+                trailing: allowLanMode == TriOption.disable ? GlyphIcon(AppGlyphs.check, size: 20) : null,
                 onTap: () => Navigator.of(context).pop(TriOption.disable),
               ),
               ListItem(
                 title: const Text('不修改'),
-                trailing: allowLanMode == TriOption.keep ? const CommonIcon(glyph: AppGlyphs.check, size: 20) : null,
+                trailing: allowLanMode == TriOption.keep ? GlyphIcon(AppGlyphs.check, size: 20) : null,
                 onTap: () => Navigator.of(context).pop(TriOption.keep),
               ),
             ],
@@ -1554,14 +1571,14 @@ def patch_dashboard_intranet_ip(src_dir: str):
                         shape: MaterialShapes.cookie6Sided,
                         color: actualRunning
                             ? colorScheme.primary
-                            : colorScheme.surfaceContainerHighest,
+                            : colors.tone2,
                         size: row.icon,
-                        child: CommonIcon(
-                          glyph: AppGlyphs.wifi,
+                        child: GlyphIcon(
+                          AppGlyphs.wifi,
                           size: row.icon * 0.5,
                           color: actualRunning
                               ? colorScheme.onPrimary
-                              : colorScheme.onSurfaceVariant,
+                              : colors.glyph,
                         ),
                       ),
                     if (showIcon) const SizedBox(width: 12),
@@ -1570,17 +1587,24 @@ def patch_dashboard_intranet_ip(src_dir: str):
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(title, style: DashboardText.rowTitle(context)),
-                          const SizedBox(height: 2),
+                          Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: DashboardText.rowTitle(context),
+                          ),
                           Text(
                             lanSubtitle,
-                            style: DashboardText.rowSubtitle(context),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: DashboardText.label(context),
                           ),
                         ],
                       ),
                     ),
-                    CommonIcon(
-                      glyph: AppGlyphs.arrowDropDown,
+                    GlyphIcon(
+                      AppGlyphs.chevronDown,
+                      size: 18,
                       color: colorScheme.onSurfaceVariant,
                     ),
                   ],
@@ -1795,7 +1819,7 @@ def patch_resources_view(src_dir: str):
     if (!isOverridden) {
       await dialogs.showCommonDialog<void>(
         child: CommonDialog(
-          title: Text(type.name),
+          title: type.name,
           padding: const EdgeInsets.all(16),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -1806,9 +1830,9 @@ def patch_resources_view(src_dir: str):
                 style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
               ),
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 '提示：「覆写资源链接」未开启，当前为只读展示。如需自定义修改链接，请先在上方开启「覆写资源链接」开关。',
-                style: TextStyle(fontSize: 12, color: Colors.grey),
+                style: TextStyle(fontSize: 12, color: context.colorScheme.onSurfaceVariant),
               ),
               const SizedBox(height: 16),
               Row(
@@ -1915,7 +1939,7 @@ class _SmartModelResourceItem extends ConsumerWidget {
     if (!isOverridden) {
       await dialogs.showCommonDialog<void>(
         child: CommonDialog(
-          title: const Text('MODEL (LightGBM)'),
+          title: 'MODEL (LightGBM)',
           padding: const EdgeInsets.all(16),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -1926,9 +1950,9 @@ class _SmartModelResourceItem extends ConsumerWidget {
                 style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
               ),
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 '提示：「覆写资源链接」未开启，当前为只读展示。如需自定义修改链接，请先在上方开启「覆写资源链接」开关。',
-                style: TextStyle(fontSize: 12, color: Colors.grey),
+                style: TextStyle(fontSize: 12, color: context.colorScheme.onSurfaceVariant),
               ),
               const SizedBox(height: 16),
               Row(
