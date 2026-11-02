@@ -282,6 +282,8 @@ enum TriOption {
     if os.path.exists(overrides_path):
         with open(overrides_path, "r", encoding="utf-8", newline="") as f:
             ov_content = f.read()
+
+        # 1. label exhaustiveness
         old_label = """extension on GeneralOverrideKey {
   String label(AppLocalizations l) => switch (this) {
     GeneralOverrideKey.testUrl => l.testUrl,
@@ -303,6 +305,48 @@ enum TriOption {
   };
 }"""
         ov_content = apply_snippet_replacement(ov_content, old_label, new_label, "GeneralOverrideKey label exhaustiveness")
+
+        # 2. values in _GeneralOverrideSpec
+        old_values = "  List<GeneralOverrideKey> get values => GeneralOverrideKey.values;"
+        new_values = """  List<GeneralOverrideKey> get values => const [
+    GeneralOverrideKey.testUrl,
+    GeneralOverrideKey.unifiedDelay,
+    GeneralOverrideKey.tcpConcurrent,
+    GeneralOverrideKey.ipv6,
+    GeneralOverrideKey.geodataLoader,
+  ];"""
+        ov_content = apply_snippet_replacement(ov_content, old_values, new_values, "_GeneralOverrideSpec values list")
+
+        # 3. fieldOf exhaustiveness in _GeneralOverrideSpec
+        old_field_tail = """        GeneralOverrideKey.geodataLoader => ToggleOverrideField(
+          (config) => config.geodataLoader == GeodataLoader.memconservative,
+          (config, value) => config.copyWith(
+            geodataLoader: value
+                ? GeodataLoader.memconservative
+                : GeodataLoader.standard,
+          ),
+        ),
+      };"""
+
+        new_field_tail = """        GeneralOverrideKey.geodataLoader => ToggleOverrideField(
+          (config) => config.geodataLoader == GeodataLoader.memconservative,
+          (config, value) => config.copyWith(
+            geodataLoader: value
+                ? GeodataLoader.memconservative
+                : GeodataLoader.standard,
+          ),
+        ),
+        GeneralOverrideKey.allowLan => ToggleOverrideField(
+          (config) => config.allowLan,
+          (config, value) => config.copyWith(allowLan: value),
+        ),
+        GeneralOverrideKey.geoXUrl => ToggleOverrideField(
+          (config) => config.generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl),
+          (config, value) => config,
+        ),
+      };"""
+        ov_content = apply_snippet_replacement(ov_content, old_field_tail, new_field_tail, "_GeneralOverrideSpec fieldOf exhaustiveness")
+
         with open(overrides_path, "w", encoding="utf-8", newline="") as f:
             f.write(ov_content)
 
@@ -506,8 +550,17 @@ def patch_widgets_config_item(src_dir: str):
     with open(path, "r", encoding="utf-8", newline="") as f:
         content = f.read()
 
-    # Allow ConfigToggleItem to render subtitle
-    old_toggle = """  @override
+    # 1. Add super.subtitle to ConfigToggleItem constructor and buildItem
+    old_toggle = """class ConfigToggleItem extends _ConfigItem<bool> {
+  const ConfigToggleItem({
+    super.key,
+    required super.selector,
+    required super.title,
+    required super.onChanged,
+    super.leading,
+  });
+
+  @override
   Widget buildItem(
     BuildContext context,
     WidgetRef ref,
@@ -522,7 +575,17 @@ def patch_widgets_config_item(src_dir: str):
     );
   }"""
 
-    new_toggle = """  @override
+    new_toggle = """class ConfigToggleItem extends _ConfigItem<bool> {
+  const ConfigToggleItem({
+    super.key,
+    required super.selector,
+    required super.title,
+    required super.onChanged,
+    super.subtitle,
+    super.leading,
+  });
+
+  @override
   Widget buildItem(
     BuildContext context,
     WidgetRef ref,
@@ -538,6 +601,50 @@ def patch_widgets_config_item(src_dir: str):
     );
   }"""
     content = apply_snippet_replacement(content, old_toggle, new_toggle, "ConfigToggleItem subtitle support")
+
+    # 2. Add super.subtitle to ConfigTextItem constructor and buildItem
+    old_text_ctor = """class ConfigTextItem extends _ConfigItem<String> {
+  const ConfigTextItem({
+    super.key,
+    required super.selector,
+    required super.title,
+    required super.onChanged,
+    this.maxLength,
+    this.keyboardType,
+    this.validator,
+    this.normalize,
+    this.allowEmpty = false,
+    super.leading,
+  });"""
+
+    new_text_ctor = """class ConfigTextItem extends _ConfigItem<String> {
+  const ConfigTextItem({
+    super.key,
+    required super.selector,
+    required super.title,
+    required super.onChanged,
+    super.subtitle,
+    this.maxLength,
+    this.keyboardType,
+    this.validator,
+    this.normalize,
+    this.allowEmpty = false,
+    super.leading,
+  });"""
+    content = apply_snippet_replacement(content, old_text_ctor, new_text_ctor, "ConfigTextItem subtitle constructor")
+
+    old_text_build = """    return ListItem.input(
+      leading: leading,
+      title: Text(label),
+      subtitle: value.isEmpty ? null : Text(value),
+      dialogTitle: label,"""
+
+    new_text_build = """    return ListItem.input(
+      leading: leading,
+      title: Text(label),
+      subtitle: buildSubtitle(appLocalizations) ?? (value.isEmpty ? null : Text(value)),
+      dialogTitle: label,"""
+    content = apply_snippet_replacement(content, old_text_build, new_text_build, "ConfigTextItem subtitle rendering")
 
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(content)
@@ -771,9 +878,11 @@ def patch_dashboard_intranet_ip(src_dir: str):
     with open(path, "r", encoding="utf-8", newline="") as f:
         content = f.read()
 
-    # Import url_launcher if not present
+    # Import url_launcher and state if not present
     if "package:url_launcher/url_launcher.dart" not in content:
         content = "import 'package:url_launcher/url_launcher.dart';\n" + content
+    if "package:fl_clash/state.dart" not in content:
+        content = "import 'package:fl_clash/state.dart';\n" + content
 
     old_body = """    final localIp = ref.watch(localIpProvider);
     final allowLan = ref.watch(
