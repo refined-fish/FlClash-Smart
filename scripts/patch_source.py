@@ -9,29 +9,39 @@ Customizes upstream chen08209/FlClash source code:
    - Only statistics proxy defaults to true.
    - Open logs (log capture) defaults to true.
    - Geo auto update defaults to true.
+   - Geo update interval defaults to 168 hours.
+   - Inbound mixedPort defaults to 0 (displays and acts as "不修改").
+   - Decoupled system proxy & HTTP overrides fallback to actual profile port when mixedPort == 0.
    - Default GeoX URLs prepended with acceleration proxy (https://v6.gh-proxy.org/).
    - Defines defaultSmartModelUrl with acceleration proxy.
-   - External controller secret is preserved and never automatically wiped on close.
-4. Adds TriOption and generalOverrideKeys (allowLan, geoXUrl) to enums.
-5. Adds smartModelUrl to Preferences and runningAllowLan to GlobalState.
+   - External controller secret defaults to empty (displays as "不修改"), never wiped or auto-generated.
+   - External controller secret is always injected if non-empty, decoupled from controller switch.
+4. Adds TriOption and generalOverrideKeys (allowLan, geoXUrl, externalController, findProcessMode) to enums.
+   - allowLan defaults to TriOption.disable (closed).
+   - externalController defaults to TriOption.keep (不修改).
+   - findProcessMode defaults to TriOption.keep (不修改).
+5. Adds smartModelUrl to Preferences and runningAllowLan, runningMixedPort, profileGeoXUrl, profileLgbmUrl to GlobalState.
 6. Decouples invasive configuration overrides in lib/common/task.dart:
    - Preserves profile external-ui and external-ui-url.
-   - Preserves profile external-controller & secret unless explicitly opened in FlClash.
-   - Preserves profile ports; only overrides if explicitly set (> 0).
-   - Preserves profile allow-lan; only overrides if allowLan is in generalOverrideKeys.
-   - Preserves profile geox-url and lgbm-url; only overrides if geoXUrl is in generalOverrideKeys.
-   - Reports actual running allow-lan state back to main isolate.
-   - Preserves profile geo-auto-update and store-selected.
+   - Preserves profile external-controller unless in generalOverrideKeys (Open/Close).
+   - Preserves profile secret unless user entered a non-empty secret.
+   - Preserves profile ports unless explicitly set (> 0).
+   - Preserves profile allow-lan unless in generalOverrideKeys.
+   - Preserves profile find-process-mode unless in generalOverrideKeys.
+   - Preserves profile geox-url and lgbm-url unless geoXUrl is in generalOverrideKeys.
+   - Returns actual running state (allowLan, mixedPort, geox-url, lgbm-url) back to main isolate.
 7. Supports "不修改" (Do not modify) in UI:
    - Port settings UI displays "不修改" when 0.
    - LAN proxy displays tri-state options ("不修改" / "开启" / "关闭") in General settings and Dashboard.
-   - Dashboard Intranet IP card displays actual running status and has a WebUI launcher button.
+   - Dashboard Intranet IP card removes switch slider, displays actual running status and dropdown selector.
+   - External controller and find-process-mode use tri-state option dropdowns.
    - External controller secret item is always accessible and displays "不修改" when empty.
-   - External controller toggle indicates "不修改 (跟随配置)" when closed.
 8. Resources View enhancements:
    - Adds "覆写资源链接" (Override Resource URLs) toggle, defaulting to OFF (不修改).
-   - Adds "Smart" section with "MODEL" resource (lgbm-url, Model.bin) allowing editing and syncing.
-   - Hooks into updateAll() to update Smart MODEL alongside Geo resources.
+   - When override is OFF: resources are read-only, displaying profile link or default link, with click showing copy dialog.
+   - When override is ON: clicking allows editing, persisting changes even if toggle is closed.
+   - Adds "Smart" section with "MODEL" resource (lgbm-url, Model.bin).
+   - Updates (auto & manual) use effective URLs (adaptive to profile, override switch, defaults).
 """
 
 import os
@@ -179,15 +189,54 @@ const defaultSmartModelUrl =
     'https://v6.gh-proxy.org/https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin';"""
         content = apply_snippet_replacement(content, old_geo, new_geo, "defaultGeoXUrl with proxy & defaultSmartModelUrl")
 
-        # geoAutoUpdate default to true
+        # defaultMixedPort = 0 (unmodified)
         content = apply_snippet_replacement(
             content,
-            "@Default(false) @JsonKey(name: 'geo-auto-update') bool geoAutoUpdate,",
-            "@Default(true) @JsonKey(name: 'geo-auto-update') bool geoAutoUpdate,",
-            "Default geoAutoUpdate=true in PatchClashConfig"
+            "const defaultMixedPort = 7890;",
+            "const defaultMixedPort = 0;",
+            "defaultMixedPort = 0 (unmodified)"
         )
 
-        # ensureControllerSecret: do not wipe secret when controller is closed
+        # geoAutoUpdate default to true, geoUpdateInterval default to 168
+        content = apply_snippet_replacement(
+            content,
+            """    @Default(false) @JsonKey(name: 'geo-auto-update') bool geoAutoUpdate,
+    @Default(24) @JsonKey(name: 'geo-update-interval') int geoUpdateInterval,""",
+            """    @Default(true) @JsonKey(name: 'geo-auto-update') bool geoAutoUpdate,
+    @Default(168) @JsonKey(name: 'geo-update-interval') int geoUpdateInterval,""",
+            "Default geoAutoUpdate=true, geoUpdateInterval=168 in PatchClashConfig"
+        )
+
+        # default generalOverrideKeys: contains allowLan (which is false, making allowLan default to disable)
+        content = apply_snippet_replacement(
+            content,
+            """    @Default({})
+    @JsonKey(
+      name: _generalOverrideKeysJsonKey,
+      fromJson: _generalOverrideKeysFromJson,
+    )
+    Set<GeneralOverrideKey> generalOverrideKeys,""",
+            """    @Default({GeneralOverrideKey.allowLan})
+    @JsonKey(
+      name: _generalOverrideKeysJsonKey,
+      fromJson: _generalOverrideKeysFromJson,
+    )
+    Set<GeneralOverrideKey> generalOverrideKeys,""",
+            "Default generalOverrideKeys={GeneralOverrideKey.allowLan}"
+        )
+
+        # Legacy generalOverrideKeys fallback: also include allowLan
+        content = apply_snippet_replacement(
+            content,
+            """    _generalOverrideKeysJsonKey: [
+      for (final key in _legacyForcedGeneralKeys) key.path,""",
+            """    _generalOverrideKeysJsonKey: [
+      for (final key in _legacyForcedGeneralKeys) key.path,
+      GeneralOverrideKey.allowLan.path,""",
+            "Include allowLan in _withLegacyGeneralOverrideKeys"
+        )
+
+        # ensureControllerSecret: never automatically generate or wipe secret
         old_secret_fn = """  PatchClashConfig ensureControllerSecret() {
     if (externalController == ExternalControllerStatus.close) {
       return secret.isEmpty ? this : copyWith(secret: '');
@@ -195,17 +244,16 @@ const defaultSmartModelUrl =
     return secret.isEmpty ? copyWith(secret: generateRandomSecret(32)) : this;
   }"""
         new_secret_fn = """  PatchClashConfig ensureControllerSecret() {
-    if (externalController != ExternalControllerStatus.close && secret.isEmpty) {
-      return copyWith(secret: generateRandomSecret(32));
-    }
     return this;
   }"""
-        content = apply_snippet_replacement(content, old_secret_fn, new_secret_fn, "Preserve secret on controller close")
+        content = apply_snippet_replacement(content, old_secret_fn, new_secret_fn, "Never wipe or auto-generate secret")
 
-        # toUpdateParams: only send geoXUrl if geoXUrl override is explicitly enabled
+        # toUpdateParams: send geoXUrl if overridden, otherwise profile/default
         old_to_update = "geoXUrl: geoXUrl.raw,"
-        new_to_update = "geoXUrl: generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl) ? geoXUrl.raw : const <String, String>{},"
-        content = apply_snippet_replacement(content, old_to_update, new_to_update, "toUpdateParams geoXUrl conditional override")
+        new_to_update = """geoXUrl: generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl)
+          ? geoXUrl.raw
+          : (globalState.profileGeoXUrl.value ?? defaultGeoXUrl.map((k, v) => MapEntry(k.name, v))),"""
+        content = apply_snippet_replacement(content, old_to_update, new_to_update, "toUpdateParams geoXUrl adaptive override")
 
         with open(clash_config_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
@@ -217,6 +265,10 @@ const defaultSmartModelUrl =
             content = f.read()
         content = content.replace("@JsonKey(name: 'geo-auto-update') this.geoAutoUpdate = false,",
                                   "@JsonKey(name: 'geo-auto-update') this.geoAutoUpdate = true,")
+        content = content.replace("@JsonKey(name: 'geo-update-interval') this.geoUpdateInterval = 24,",
+                                  "@JsonKey(name: 'geo-update-interval') this.geoUpdateInterval = 168,")
+        content = content.replace("Set<GeneralOverrideKey> generalOverrideKeys = const {}}",
+                                  "Set<GeneralOverrideKey> generalOverrideKeys = const {GeneralOverrideKey.allowLan}}")
         with open(clash_freezed_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         print("[+] Patched clash_config.freezed.dart defaults")
@@ -228,9 +280,40 @@ const defaultSmartModelUrl =
             content = f.read()
         content = content.replace("geoAutoUpdate: json['geo-auto-update'] as bool? ?? false,",
                                   "geoAutoUpdate: json['geo-auto-update'] as bool? ?? true,")
+        content = content.replace("geoUpdateInterval: (json['geo-update-interval'] as num?)?.toInt() ?? 24,",
+                                  "geoUpdateInterval: (json['geo-update-interval'] as num?)?.toInt() ?? 168,")
+        content = content.replace("generalOverrideKeys: json['general-override-keys'] == null\n          ? const {}",
+                                  "generalOverrideKeys: json['general-override-keys'] == null\n          ? const {GeneralOverrideKey.allowLan}")
         with open(clash_g_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         print("[+] Patched clash_config.g.dart defaults")
+
+    # 7. lib/models/core.dart & generated
+    core_path = os.path.join(src_dir, "lib", "models", "core.dart")
+    if os.path.exists(core_path):
+        with open(core_path, "r", encoding="utf-8", newline="") as f:
+            content = f.read()
+        content = content.replace("@Default(24) @JsonKey(name: 'geo-update-interval') int geoUpdateInterval,",
+                                  "@Default(168) @JsonKey(name: 'geo-update-interval') int geoUpdateInterval,")
+        with open(core_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+    core_freezed_path = os.path.join(src_dir, "lib", "models", "generated", "core.freezed.dart")
+    if os.path.exists(core_freezed_path):
+        with open(core_freezed_path, "r", encoding="utf-8", newline="") as f:
+            content = f.read()
+        content = content.replace("geoUpdateInterval = 24,", "geoUpdateInterval = 168,")
+        with open(core_freezed_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+    core_g_path = os.path.join(src_dir, "lib", "models", "generated", "core.g.dart")
+    if os.path.exists(core_g_path):
+        with open(core_g_path, "r", encoding="utf-8", newline="") as f:
+            content = f.read()
+        content = content.replace("geoUpdateInterval: (json['geo-update-interval'] as num?)?.toInt() ?? 24,",
+                                  "geoUpdateInterval: (json['geo-update-interval'] as num?)?.toInt() ?? 168,")
+        with open(core_g_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
 
 def patch_enum_dart(src_dir: str):
     path = os.path.join(src_dir, "lib", "enum", "enum.dart")
@@ -259,7 +342,9 @@ def patch_enum_dart(src_dir: str):
   ipv6('ipv6'),
   geodataLoader('geodata-loader'),
   allowLan('allow-lan'),
-  geoXUrl('geox-url');
+  geoXUrl('geox-url'),
+  externalController('external-controller'),
+  findProcessMode('find-process-mode');
 
   const GeneralOverrideKey(this.path);
 
@@ -302,11 +387,13 @@ enum TriOption {
     GeneralOverrideKey.geodataLoader => l.geodataLoader,
     GeneralOverrideKey.allowLan => l.allowLan,
     GeneralOverrideKey.geoXUrl => l.geoResources,
+    GeneralOverrideKey.externalController => l.externalController,
+    GeneralOverrideKey.findProcessMode => l.findProcessMode,
   };
 }"""
         ov_content = apply_snippet_replacement(ov_content, old_label, new_label, "GeneralOverrideKey label exhaustiveness")
 
-        # 2. values in _GeneralOverrideSpec
+        # 2. values in _GeneralOverrideSpec (keep 5 core items only)
         old_values = "  List<GeneralOverrideKey> get values => GeneralOverrideKey.values;"
         new_values = """  List<GeneralOverrideKey> get values => const [
     GeneralOverrideKey.testUrl,
@@ -344,6 +431,18 @@ enum TriOption {
           (config) => config.generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl),
           (config, value) => config,
         ),
+        GeneralOverrideKey.externalController => ToggleOverrideField(
+          (config) => config.externalController == ExternalControllerStatus.open,
+          (config, value) => config.copyWith(
+            externalController: value ? ExternalControllerStatus.open : ExternalControllerStatus.close,
+          ),
+        ),
+        GeneralOverrideKey.findProcessMode => ToggleOverrideField(
+          (config) => config.findProcessMode == FindProcessMode.always,
+          (config, value) => config.copyWith(
+            findProcessMode: value ? FindProcessMode.always : FindProcessMode.off,
+          ),
+        ),
       };"""
         ov_content = apply_snippet_replacement(ov_content, old_field_tail, new_field_tail, "_GeneralOverrideSpec fieldOf exhaustiveness")
 
@@ -359,13 +458,22 @@ def patch_preferences_and_state(src_dir: str):
 
         old_pref_tail = "  Preferences._internal();"
         new_pref_tail = """  Preferences._internal();
+  String? _smartModelUrlCache;
 
   Future<String> getSmartModelUrl() async {
+    if (_smartModelUrlCache != null) return _smartModelUrlCache!;
     final preferences = await _store.value;
-    return preferences?.getString('smartModelUrl') ?? defaultSmartModelUrl;
+    final val = preferences?.getString('smartModelUrl') ?? defaultSmartModelUrl;
+    _smartModelUrlCache = val;
+    return val;
+  }
+
+  String getSmartModelUrlSync() {
+    return _smartModelUrlCache ?? defaultSmartModelUrl;
   }
 
   Future<void> setSmartModelUrl(String url) async {
+    _smartModelUrlCache = url;
     final preferences = await _store.value;
     await preferences?.setString('smartModelUrl', url);
   }"""
@@ -381,8 +489,11 @@ def patch_preferences_and_state(src_dir: str):
 
         old_state = "  bool isAttach = false;"
         new_state = """  bool isAttach = false;
-  final ValueNotifier<bool?> runningAllowLan = ValueNotifier<bool?>(null);"""
-        content = apply_snippet_replacement(content, old_state, new_state, "GlobalState runningAllowLan notifier")
+  final ValueNotifier<bool?> runningAllowLan = ValueNotifier<bool?>(null);
+  final ValueNotifier<int?> runningMixedPort = ValueNotifier<int?>(null);
+  final ValueNotifier<Map<String, String>?> profileGeoXUrl = ValueNotifier<Map<String, String>?>(null);
+  final ValueNotifier<String?> profileLgbmUrl = ValueNotifier<String?>(null);"""
+        content = apply_snippet_replacement(content, old_state, new_state, "GlobalState running notifiers")
         with open(state_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
 
@@ -396,12 +507,12 @@ def patch_task_dart(src_dir: str):
 
     print(f"[*] Patching non-intrusive config logic in {path}...")
 
-    # RealProfile record definition: add allowLan
+    # RealProfile record definition: add allowLan, mixedPort, geoXUrl, lgbmUrl
     content = apply_snippet_replacement(
         content,
         "typedef RealProfile = ({String yaml, String md5, ConfigCounts counts});",
-        "typedef RealProfile = ({String yaml, String md5, ConfigCounts counts, bool allowLan});",
-        "RealProfile definition with allowLan"
+        "typedef RealProfile = ({String yaml, String md5, ConfigCounts counts, bool allowLan, int? mixedPort, Map<String, String>? geoXUrl, String? lgbmUrl});",
+        "RealProfile definition with state fields"
     )
 
     # 1. External UI: Preserve from profile rather than forcing empty string
@@ -418,23 +529,22 @@ def patch_task_dart(src_dir: str):
         "Preserve external-ui-url"
     )
 
-    # 2. External controller & secret: Keep from profile unless explicitly opened in FlClash
+    # 2. External controller & secret: Decoupled and non-intrusive
     old_ext = """  rawConfig['external-controller'] =
       data.safeMode || realPatchConfig.secret.isEmpty
       ? ''
       : realPatchConfig.externalController.value;
   rawConfig['secret'] = realPatchConfig.secret;"""
 
-    new_ext = """  // [FlClash-Smart] Preserve external-controller and secret from profile if present
-  if (realPatchConfig.externalController.value.isNotEmpty) {
+    new_ext = """  // [FlClash-Smart] External-controller override (tri-state)
+  if (realPatchConfig.generalOverrideKeys.contains(GeneralOverrideKey.externalController)) {
     rawConfig['external-controller'] = realPatchConfig.externalController.value;
-    if (realPatchConfig.secret.isNotEmpty) {
-      rawConfig['secret'] = realPatchConfig.secret;
-    }
-  } else if (rawConfig['external-controller'] == null) {
-    rawConfig['external-controller'] = '';
+  }
+  // [FlClash-Smart] Secret override (decoupled from external controller)
+  if (realPatchConfig.secret.isNotEmpty) {
+    rawConfig['secret'] = realPatchConfig.secret;
   }"""
-    content = apply_snippet_replacement(content, old_ext, new_ext, "Preserve external-controller & secret")
+    content = apply_snippet_replacement(content, old_ext, new_ext, "Preserve external-controller & decoupled secret")
 
     # 3. Ports, keep-alive, find-process-mode, and allow-lan:
     old_ports = """  rawConfig['port'] = 0;
@@ -457,19 +567,13 @@ def patch_task_dart(src_dir: str):
   if (realPatchConfig.redirPort > 0) rawConfig['redir-port'] = realPatchConfig.redirPort;
   if (realPatchConfig.tproxyPort > 0) rawConfig['tproxy-port'] = realPatchConfig.tproxyPort;
   if (realPatchConfig.mixedPort > 0) {
-    if (rawConfig['mixed-port'] == null && rawConfig['port'] == null && rawConfig['socks-port'] == null) {
-      rawConfig['mixed-port'] = realPatchConfig.mixedPort;
-    } else if (realPatchConfig.mixedPort != defaultMixedPort) {
-      rawConfig['mixed-port'] = realPatchConfig.mixedPort;
-    }
+    rawConfig['mixed-port'] = realPatchConfig.mixedPort;
   }
   if (rawConfig['keep-alive-interval'] == null) rawConfig['keep-alive-interval'] = realPatchConfig.keepAliveInterval;
   if (rawConfig['keep-alive-idle'] == null) rawConfig['keep-alive-idle'] = realPatchConfig.keepAliveIdle;
   if (rawConfig['disable-keep-alive'] == null) rawConfig['disable-keep-alive'] = realPatchConfig.disableKeepAlive;
   if (realPatchConfig.routingMark != 0) rawConfig['routing-mark'] = realPatchConfig.routingMark;
-  if (realPatchConfig.findProcessMode != FindProcessMode.off) {
-    rawConfig['find-process-mode'] = realPatchConfig.findProcessMode.name;
-  } else if (rawConfig['find-process-mode'] == null) {
+  if (realPatchConfig.generalOverrideKeys.contains(GeneralOverrideKey.findProcessMode)) {
     rawConfig['find-process-mode'] = realPatchConfig.findProcessMode.name;
   }
   // [FlClash-Smart] Preserve allow-lan from profile unless explicitly overridden in FlClash
@@ -488,11 +592,14 @@ def patch_task_dart(src_dir: str):
   }
   if (realPatchConfig.generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl)) {
     rawConfig['geox-url'] = realPatchConfig.geoXUrl.raw;
-    rawConfig['lgbm-url'] = defaultSmartModelUrl;
+    final smartModel = preferences.getSmartModelUrlSync();
+    if (smartModel.isNotEmpty) {
+      rawConfig['lgbm-url'] = smartModel;
+    }
   } else {
     if (rawConfig['geox-url'] == null ||
         (rawConfig['geox-url'] is Map && (rawConfig['geox-url'] as Map).isEmpty)) {
-      rawConfig['geox-url'] = realPatchConfig.geoXUrl.raw;
+      rawConfig['geox-url'] = defaultGeoXUrl.map((k, v) => MapEntry(k.name, v));
     }
     if (rawConfig['lgbm-url'] == null ||
         (rawConfig['lgbm-url'] is String && (rawConfig['lgbm-url'] as String).isEmpty)) {
@@ -513,18 +620,35 @@ def patch_task_dart(src_dir: str):
   }"""
     content = apply_snippet_replacement(content, old_geo_update, new_geo_update, "Preserve geo-auto-update")
 
-    # 6. Return allowLan in _makeRealProfileTask
+    # 6. Return allowLan, mixedPort, geoXUrl, lgbmUrl in _makeRealProfileTask
     old_return = """  final yaml = await _encodeYaml(Map<String, dynamic>.from(rawConfig));
   return (yaml: yaml, md5: yaml.toMd5(), counts: configCountsOf(rawConfig));"""
 
     new_return = """  final yaml = await _encodeYaml(Map<String, dynamic>.from(rawConfig));
+  int? runningPort;
+  if (rawConfig['mixed-port'] is int && rawConfig['mixed-port'] > 0) {
+    runningPort = rawConfig['mixed-port'];
+  } else if (rawConfig['port'] is int && rawConfig['port'] > 0) {
+    runningPort = rawConfig['port'];
+  }
+  Map<String, String>? pGeoX;
+  if (rawConfig['geox-url'] is Map) {
+    pGeoX = Map<String, String>.from((rawConfig['geox-url'] as Map).map((k, v) => MapEntry(k.toString(), v.toString())));
+  }
+  String? pLgbm;
+  if (rawConfig['lgbm-url'] is String) {
+    pLgbm = rawConfig['lgbm-url'];
+  }
   return (
     yaml: yaml,
     md5: yaml.toMd5(),
     counts: configCountsOf(rawConfig),
     allowLan: rawConfig['allow-lan'] == true,
+    mixedPort: runningPort,
+    geoXUrl: pGeoX,
+    lgbmUrl: pLgbm,
   );"""
-    content = apply_snippet_replacement(content, old_return, new_return, "Return allowLan in RealProfile")
+    content = apply_snippet_replacement(content, old_return, new_return, "Return state fields in RealProfile")
 
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(content)
@@ -537,8 +661,12 @@ def patch_setup_dart(src_dir: str):
         content = f.read()
 
     old_snippet = "    if (profileBase == null) {"
-    new_snippet = "    globalState.runningAllowLan.value = res.allowLan;\n    if (profileBase == null) {"
-    content = apply_snippet_replacement(content, old_snippet, new_snippet, "Update globalState.runningAllowLan in getProfile")
+    new_snippet = """    globalState.runningAllowLan.value = res.allowLan;
+    globalState.runningMixedPort.value = res.mixedPort;
+    globalState.profileGeoXUrl.value = res.geoXUrl;
+    globalState.profileLgbmUrl.value = res.lgbmUrl;
+    if (profileBase == null) {"""
+    content = apply_snippet_replacement(content, old_snippet, new_snippet, "Update globalState notifiers in getProfile")
 
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(content)
@@ -649,6 +777,136 @@ def patch_widgets_config_item(src_dir: str):
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(content)
 
+def patch_proxy_helpers(src_dir: str):
+    # 1. lib/common/http.dart
+    http_path = os.path.join(src_dir, "lib", "common", "http.dart")
+    if os.path.exists(http_path):
+        with open(http_path, "r", encoding="utf-8", newline="") as f:
+            content = f.read()
+        old_http = """    final mixedPort = read(
+      patchClashConfigProvider.select((state) => state.mixedPort),
+    );
+    final authentication = read(
+      networkSettingProvider.select((state) => state.authentication),
+    );
+    final credentials = authentication.credentials;
+    final userInfo = credentials.isNotEmpty ? '${credentials.first}@' : '';
+    return 'PROXY ${userInfo}localhost:$mixedPort';"""
+        new_http = """    final mixedPort = read(
+      patchClashConfigProvider.select((state) => state.mixedPort),
+    );
+    final effectivePort = mixedPort != 0 ? mixedPort : (globalState.runningMixedPort.value ?? 7890);
+    final authentication = read(
+      networkSettingProvider.select((state) => state.authentication),
+    );
+    final credentials = authentication.credentials;
+    final userInfo = credentials.isNotEmpty ? '${credentials.first}@' : '';
+    return 'PROXY ${userInfo}localhost:$effectivePort';"""
+        content = apply_snippet_replacement(content, old_http, new_http, "http.dart effective port fallback")
+        with open(http_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+    # 2. lib/providers/state/proxies.dart
+    proxies_path = os.path.join(src_dir, "lib", "providers", "state", "proxies.dart")
+    if os.path.exists(proxies_path):
+        with open(proxies_path, "r", encoding="utf-8", newline="") as f:
+            content = f.read()
+        old_prox = """  final mixedPort = ref.watch(
+    patchClashConfigProvider.select((state) => state.mixedPort),
+  );
+  return ProxyState(
+    isStart: suspend ? false : isStart,
+    systemProxy: systemProxySelector.systemProxy,
+    bassDomain: systemProxySelector.bypassDomain,
+    port: mixedPort,
+  );"""
+        new_prox = """  final mixedPort = ref.watch(
+    patchClashConfigProvider.select((state) => state.mixedPort),
+  );
+  final effectivePort = mixedPort != 0 ? mixedPort : (globalState.runningMixedPort.value ?? 7890);
+  return ProxyState(
+    isStart: suspend ? false : isStart,
+    systemProxy: systemProxySelector.systemProxy,
+    bassDomain: systemProxySelector.bypassDomain,
+    port: effectivePort,
+  );"""
+        content = apply_snippet_replacement(content, old_prox, new_prox, "proxies.dart ProxyState effective port")
+        with open(proxies_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+    # 3. lib/providers/state/system.dart
+    sys_path = os.path.join(src_dir, "lib", "providers", "state", "system.dart")
+    if os.path.exists(sys_path):
+        with open(sys_path, "r", encoding="utf-8", newline="") as f:
+            content = f.read()
+        old_tray = """  return TrayState(
+    mode: clashConfig.mode,
+    port: clashConfig.mixedPort,"""
+        new_tray = """  final effectiveTrayPort = clashConfig.mixedPort != 0 ? clashConfig.mixedPort : (globalState.runningMixedPort.value ?? 7890);
+  return TrayState(
+    mode: clashConfig.mode,
+    port: effectiveTrayPort,"""
+        content = apply_snippet_replacement(content, old_tray, new_tray, "system.dart TrayState effective port")
+
+        old_vpn = """    systemProxy:
+        vpnSetting.systemProxy && !networkSetting.authenticated && !safeMode,
+    port: clashConfig.mixedPort,"""
+        new_vpn = """    systemProxy:
+        vpnSetting.systemProxy && !networkSetting.authenticated && !safeMode,
+    port: clashConfig.mixedPort != 0 ? clashConfig.mixedPort : (globalState.runningMixedPort.value ?? 7890),"""
+        content = apply_snippet_replacement(content, old_vpn, new_vpn, "system.dart VpnOptions effective port")
+        with open(sys_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+    # 4. lib/providers/actions/system.dart
+    sys_act_path = os.path.join(src_dir, "lib", "providers", "actions", "system.dart")
+    if os.path.exists(sys_act_path):
+        with open(sys_act_path, "r", encoding="utf-8", newline="") as f:
+            content = f.read()
+        old_copy = """  Future<void> copyProxyEnv() async {
+    final port = ref.read(
+      patchClashConfigProvider.select((state) => state.mixedPort),
+    );
+    await Clipboard.setData(
+      ClipboardData(text: proxyEnvCommand(port, isWindows: system.isWindows)),
+    );
+  }"""
+        new_copy = """  Future<void> copyProxyEnv() async {
+    final port = ref.read(
+      patchClashConfigProvider.select((state) => state.mixedPort),
+    );
+    final effectivePort = port != 0 ? port : (globalState.runningMixedPort.value ?? 7890);
+    await Clipboard.setData(
+      ClipboardData(text: proxyEnvCommand(effectivePort, isWindows: system.isWindows)),
+    );
+  }"""
+        content = apply_snippet_replacement(content, old_copy, new_copy, "system.dart copyProxyEnv effective port")
+        with open(sys_act_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+    # 5. lib/views/dashboard/widgets/network_takeover.dart
+    takeover_path = os.path.join(src_dir, "lib", "views", "dashboard", "widgets", "network_takeover.dart")
+    if os.path.exists(takeover_path):
+        with open(takeover_path, "r", encoding="utf-8", newline="") as f:
+            content = f.read()
+        old_on = """    final on = systemProxy
+        ? appLocalizations.portValue(
+            ref.watch(
+              patchClashConfigProvider.select((state) => state.mixedPort),
+            ),
+          )
+        : appLocalizations.enabled;"""
+        new_on = """    final port = ref.watch(
+      patchClashConfigProvider.select((state) => state.mixedPort),
+    );
+    final effectivePort = port != 0 ? port : (globalState.runningMixedPort.value ?? 7890);
+    final on = systemProxy
+        ? appLocalizations.portValue(effectivePort)
+        : appLocalizations.enabled;"""
+        content = apply_snippet_replacement(content, old_on, new_on, "network_takeover.dart effective port")
+        with open(takeover_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
 def patch_general_views(src_dir: str):
     # 1. port_form.dart
     port_form_path = os.path.join(src_dir, "lib", "views", "config", "general", "port_form.dart")
@@ -656,26 +914,92 @@ def patch_general_views(src_dir: str):
         with open(port_form_path, "r", encoding="utf-8", newline="") as f:
             content = f.read()
 
-        # Allow disabled mixedPort
-        content = apply_snippet_replacement(
-            content,
-            """      _PortField(
+        # Allow disabled mixedPort and initialize with empty string when 0
+        old_init = """    _mixedPortController = TextEditingController(text: ports.mixed.toString());
+    _portController = TextEditingController(text: ports.http.toString());
+    _socksPortController = TextEditingController(text: ports.socks.toString());
+    _redirPortController = TextEditingController(text: ports.redir.toString());
+    _tProxyPortController = TextEditingController(
+      text: ports.tproxy.toString(),
+    );
+    _fields = [
+      _PortField(
         controller: _mixedPortController,
         label: (appLocalizations) => appLocalizations.mixedPort,
         allowDisabled: false,
-      ),""",
-            """      _PortField(
+      ),"""
+
+        new_init = """    _mixedPortController = TextEditingController(text: ports.mixed == 0 ? '' : ports.mixed.toString());
+    _portController = TextEditingController(text: ports.http == 0 ? '' : ports.http.toString());
+    _socksPortController = TextEditingController(text: ports.socks == 0 ? '' : ports.socks.toString());
+    _redirPortController = TextEditingController(text: ports.redir == 0 ? '' : ports.redir.toString());
+    _tProxyPortController = TextEditingController(
+      text: ports.tproxy == 0 ? '' : ports.tproxy.toString(),
+    );
+    _fields = [
+      _PortField(
         controller: _mixedPortController,
         label: (appLocalizations) => appLocalizations.mixedPort,
         allowDisabled: true,
-      ),""",
-            "Allow disabled mixed port"
+      ),"""
+        content = apply_snippet_replacement(content, old_init, new_init, "Allow disabled mixed port in form init")
+
+        # Reset button sets mixedPort: 0
+        content = apply_snippet_replacement(
+            content,
+            "mixedPort: 7890,",
+            "mixedPort: 0,",
+            "Reset mixedPort to 0 in port form"
         )
 
-        # Show (不修改) when port is 0 in FormRow
-        old_form_row = "title: field.label(appLocalizations),"
-        new_form_row = "title: field.controller.text == '0' ? '${field.label(appLocalizations)} (不修改)' : field.label(appLocalizations),"
-        content = apply_snippet_replacement(content, old_form_row, new_form_row, "Show (不修改) when port is 0 in form")
+        # Handle update parses with fallback 0
+        old_update = """            mixedPort: int.parse(_mixedPortController.text),
+            port: int.parse(_portController.text),
+            socksPort: int.parse(_socksPortController.text),
+            redirPort: int.parse(_redirPortController.text),
+            tproxyPort: int.parse(_tProxyPortController.text),"""
+
+        new_update = """            mixedPort: int.tryParse(_mixedPortController.text) ?? 0,
+            port: int.tryParse(_portController.text) ?? 0,
+            socksPort: int.tryParse(_socksPortController.text) ?? 0,
+            redirPort: int.tryParse(_redirPortController.text) ?? 0,
+            tproxyPort: int.tryParse(_tProxyPortController.text) ?? 0,"""
+        content = apply_snippet_replacement(content, old_update, new_update, "Parse ports with fallback 0 in update")
+
+        # Validation: allow empty or 0 if field.allowDisabled
+        old_validate = """    final label = field.label(appLocalizations);
+    if (value == null || value.isEmpty) {
+      return appLocalizations.emptyTip(label);
+    }
+    final port = int.tryParse(value);"""
+
+        new_validate = """    final label = field.label(appLocalizations);
+    if (field.allowDisabled && (value == null || value.isEmpty || value == '0')) {
+      return null;
+    }
+    if (value == null || value.isEmpty) {
+      return appLocalizations.emptyTip(label);
+    }
+    final port = int.tryParse(value);"""
+        content = apply_snippet_replacement(content, old_validate, new_validate, "Allow empty port in validation")
+
+        # Form row title & hint
+        old_form_row = """              FormRow(
+                title: field.label(appLocalizations),
+                invalid: issues.containsKey(field),
+                trailing: FormRowTextField(
+                  controller: field.controller,
+                  hintText: appLocalizations.required,"""
+
+        new_form_row = """              FormRow(
+                title: field.controller.text.isEmpty || field.controller.text == '0'
+                    ? '${field.label(appLocalizations)} (不修改)'
+                    : field.label(appLocalizations),
+                invalid: issues.containsKey(field),
+                trailing: FormRowTextField(
+                  controller: field.controller,
+                  hintText: '不修改',"""
+        content = apply_snippet_replacement(content, old_form_row, new_form_row, "Show (不修改) in form rows")
 
         with open(port_form_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
@@ -710,8 +1034,8 @@ def patch_general_views(src_dir: str):
     );"""
         content = apply_snippet_replacement(content, old_port_item, new_port_item, "PortItem show 不修改")
 
-        # AllowLanItem definition
-        allow_lan_item_class = """class AllowLanItem extends ConsumerWidget {
+        # Define AllowLanItem, ExternalControllerItem, FindProcessModeItem
+        new_items_code = """class AllowLanItem extends ConsumerWidget {
   const AllowLanItem({super.key});
 
   @override
@@ -748,15 +1072,99 @@ def patch_general_views(src_dir: str):
     );
   }
 }
+
+class ExternalControllerItem extends ConsumerWidget {
+  const ExternalControllerItem({super.key});
+
+  @override
+  Widget build(BuildContext context, ref) {
+    return ConfigOptionsItem<TriOption>(
+      title: (l) => l.externalController,
+      options: TriOption.values,
+      textBuilder: (option) => switch (option) {
+        TriOption.keep => '不修改',
+        TriOption.enable => '开启 (127.0.0.1:9090)',
+        TriOption.disable => '关闭',
+      },
+      selector: patchClashConfigProvider.select((state) {
+        if (!state.generalOverrideKeys.contains(GeneralOverrideKey.externalController)) {
+          return TriOption.keep;
+        }
+        return state.externalController == ExternalControllerStatus.open
+            ? TriOption.enable
+            : TriOption.disable;
+      }),
+      onChanged: (ref, value) => ref
+          .read(patchClashConfigProvider.notifier)
+          .update((state) {
+            final keys = Set<GeneralOverrideKey>.from(state.generalOverrideKeys);
+            if (value == TriOption.keep) {
+              keys.remove(GeneralOverrideKey.externalController);
+              return state.copyWith(generalOverrideKeys: keys);
+            } else {
+              keys.add(GeneralOverrideKey.externalController);
+              return state.copyWith(
+                generalOverrideKeys: keys,
+                externalController: value == TriOption.enable
+                    ? ExternalControllerStatus.open
+                    : ExternalControllerStatus.close,
+              );
+            }
+          }),
+    );
+  }
+}
+
+class FindProcessModeItem extends ConsumerWidget {
+  const FindProcessModeItem({super.key});
+
+  @override
+  Widget build(BuildContext context, ref) {
+    return ConfigOptionsItem<TriOption>(
+      title: (l) => l.findProcessMode,
+      options: TriOption.values,
+      textBuilder: (option) => switch (option) {
+        TriOption.keep => '不修改',
+        TriOption.enable => '开启 (always)',
+        TriOption.disable => '关闭 (off)',
+      },
+      selector: patchClashConfigProvider.select((state) {
+        if (!state.generalOverrideKeys.contains(GeneralOverrideKey.findProcessMode)) {
+          return TriOption.keep;
+        }
+        return state.findProcessMode == FindProcessMode.always
+            ? TriOption.enable
+            : TriOption.disable;
+      }),
+      onChanged: (ref, value) => ref
+          .read(patchClashConfigProvider.notifier)
+          .update((state) {
+            final keys = Set<GeneralOverrideKey>.from(state.generalOverrideKeys);
+            if (value == TriOption.keep) {
+              keys.remove(GeneralOverrideKey.findProcessMode);
+              return state.copyWith(generalOverrideKeys: keys);
+            } else {
+              keys.add(GeneralOverrideKey.findProcessMode);
+              return state.copyWith(
+                generalOverrideKeys: keys,
+                findProcessMode: value == TriOption.enable
+                    ? FindProcessMode.always
+                    : FindProcessMode.off,
+              );
+            }
+          }),
+    );
+  }
+}
 """
         content = apply_snippet_replacement(
             content,
             "class ExternalControllerSecretItem extends ConsumerWidget {",
-            allow_lan_item_class + "\nclass ExternalControllerSecretItem extends ConsumerWidget {",
-            "Add AllowLanItem class"
+            new_items_code + "\nclass ExternalControllerSecretItem extends ConsumerWidget {",
+            "Add TriOption items classes in general.dart"
         )
 
-        # ExternalControllerSecretItem show '不修改' when secret is empty
+        # ExternalControllerSecretItem: show '不修改' when secret is empty, allow empty
         old_secret_item = """class ExternalControllerSecretItem extends ConsumerWidget {
   const ExternalControllerSecretItem({super.key});
 
@@ -788,6 +1196,7 @@ def patch_general_views(src_dir: str):
       maxLength: TextInputLimits.password,
       selector: patchClashConfigProvider.select((state) => state.secret),
       normalize: (value) => value.trim(),
+      allowEmpty: true,
       onChanged: (ref, value) => ref
           .read(patchClashConfigProvider.notifier)
           .update((state) => state.copyWith(secret: value)),
@@ -796,8 +1205,13 @@ def patch_general_views(src_dir: str):
 }"""
         content = apply_snippet_replacement(content, old_secret_item, new_secret_item, "ExternalControllerSecretItem subtitle")
 
-        # Replace _clashToggle allowLan with AllowLanItem, externalController subtitle, unhide secret
-        old_inbound = """      const PortItem(),
+        # Update _inboundItems in general.dart
+        old_inbound = """  List<Widget> _inboundItems({
+    required bool authentication,
+    required bool externalController,
+  }) {
+    return [
+      const PortItem(),
       _clashToggle(
         title: (l) => l.allowLan,
         select: (state) => state.allowLan,
@@ -815,58 +1229,40 @@ def patch_general_views(src_dir: str):
             )
             .ensureControllerSecret(),
       ),
-      if (externalController) const ExternalControllerSecretItem(),"""
+      if (externalController) const ExternalControllerSecretItem(),
+      const AuthenticationItem(),"""
 
-        new_inbound = """      const PortItem(),
+        new_inbound = """  List<Widget> _inboundItems({
+    required bool authentication,
+    required bool externalController,
+  }) {
+    return [
+      const PortItem(),
       const AllowLanItem(),
+      const ExternalControllerItem(),
+      const ExternalControllerSecretItem(),
+      const AuthenticationItem(),"""
+        content = apply_snippet_replacement(content, old_inbound, new_inbound, "Update _inboundItems with TriOption items")
+
+        # Update _connectionItems in general.dart
+        old_conn = """  List<Widget> _connectionItems() {
+    return [
+      const DelayTestTimeoutItem(),
       _clashToggle(
-        title: (l) => l.externalController,
-        subtitle: (l) =>
-            externalController ? '开启 (127.0.0.1:9090)' : '不修改 (跟随配置)',
-        select: (state) =>
-            state.externalController == ExternalControllerStatus.open,
-        update: (state, value) => state
-            .copyWith(
-              externalController: value
-                  ? ExternalControllerStatus.open
-                  : ExternalControllerStatus.close,
-            )
-            .ensureControllerSecret(),
+        title: (l) => l.findProcessMode,
+        select: (state) => state.findProcessMode == FindProcessMode.always,
+        update: (state, value) => state.copyWith(
+          findProcessMode: value ? FindProcessMode.always : FindProcessMode.off,
+        ),
       ),
-      const ExternalControllerSecretItem(),"""
-        content = apply_snippet_replacement(content, old_inbound, new_inbound, "Update _inboundItems in general.dart")
+      _appSettingToggle("""
 
-        # Update _clashToggle definition to support subtitle
-        old_clash_toggle = """ConfigToggleItem _clashToggle({
-  required ConfigLabel title,
-  required bool Function(PatchClashConfig state) select,
-  required PatchClashConfig Function(PatchClashConfig state, bool value) update,
-}) {
-  return ConfigToggleItem(
-    title: title,
-    selector: patchClashConfigProvider.select(select),
-    onChanged: (ref, value) => ref
-        .read(patchClashConfigProvider.notifier)
-        .update((state) => update(state, value)),
-  );
-}"""
-
-        new_clash_toggle = """ConfigToggleItem _clashToggle({
-  required ConfigLabel title,
-  ConfigLabel? subtitle,
-  required bool Function(PatchClashConfig state) select,
-  required PatchClashConfig Function(PatchClashConfig state, bool value) update,
-}) {
-  return ConfigToggleItem(
-    title: title,
-    subtitle: subtitle,
-    selector: patchClashConfigProvider.select(select),
-    onChanged: (ref, value) => ref
-        .read(patchClashConfigProvider.notifier)
-        .update((state) => update(state, value)),
-  );
-}"""
-        content = apply_snippet_replacement(content, old_clash_toggle, new_clash_toggle, "_clashToggle subtitle support")
+        new_conn = """  List<Widget> _connectionItems() {
+    return [
+      const DelayTestTimeoutItem(),
+      const FindProcessModeItem(),
+      _appSettingToggle("""
+        content = apply_snippet_replacement(content, old_conn, new_conn, "Update _connectionItems with FindProcessModeItem")
 
         with open(general_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
@@ -1008,6 +1404,7 @@ def patch_dashboard_intranet_ip(src_dir: str):
     final port = ref.watch(
       patchClashConfigProvider.select((state) => state.mixedPort),
     );
+    final runningPort = port > 0 ? port : (globalState.runningMixedPort.value ?? 7890);
     final actualRunning = globalState.runningAllowLan.value ?? (isAllowLanOverridden ? allowLan : false);
     final figure = mobile
         ? (style: AppTextStyle.title1, top: 12.0)
@@ -1031,40 +1428,36 @@ def patch_dashboard_intranet_ip(src_dir: str):
       context,
       figure.style,
     ).copyWith(letterSpacing: 0);
-    final effectivePort = port > 0 ? port : 7890;
     final address = localIp == null || localIp.isEmpty
         ? null
         : actualRunning
-        ? '$localIp:$effectivePort'
+        ? '$localIp:$runningPort'
         : localIp;
 
     Future<void> showAllowLanMenu() async {
-      final selected = await showFloatingDialog<TriOption>(
-        context: Navigator.of(context, rootNavigator: true).context,
-        child: CommonPopupMenu(
-          items: [
-            CommonPopupMenuItem(
-              label: '不修改 (跟随配置)',
-              checked: allowLanMode == TriOption.keep,
-              onPressed: () {
-                Navigator.of(context, rootNavigator: true).pop(TriOption.keep);
-              },
-            ),
-            CommonPopupMenuItem(
-              label: '开启',
-              checked: allowLanMode == TriOption.enable,
-              onPressed: () {
-                Navigator.of(context, rootNavigator: true).pop(TriOption.enable);
-              },
-            ),
-            CommonPopupMenuItem(
-              label: '关闭',
-              checked: allowLanMode == TriOption.disable,
-              onPressed: () {
-                Navigator.of(context, rootNavigator: true).pop(TriOption.disable);
-              },
-            ),
-          ],
+      final selected = await dialogs.showCommonDialog<TriOption>(
+        child: CommonDialog(
+          title: Text(appLocalizations.allowLan),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 16),
+          child: Wrap(
+            children: [
+              ListItem(
+                title: const Text('开启'),
+                trailing: allowLanMode == TriOption.enable ? const CommonIcon(glyph: AppGlyphs.check, size: 20) : null,
+                onTap: () => Navigator.of(context).pop(TriOption.enable),
+              ),
+              ListItem(
+                title: const Text('关闭'),
+                trailing: allowLanMode == TriOption.disable ? const CommonIcon(glyph: AppGlyphs.check, size: 20) : null,
+                onTap: () => Navigator.of(context).pop(TriOption.disable),
+              ),
+              ListItem(
+                title: const Text('不修改'),
+                trailing: allowLanMode == TriOption.keep ? const CommonIcon(glyph: AppGlyphs.check, size: 20) : null,
+                onTap: () => Navigator.of(context).pop(TriOption.keep),
+              ),
+            ],
+          ),
         ),
       );
       if (selected == null) return;
@@ -1141,39 +1534,64 @@ def patch_dashboard_intranet_ip(src_dir: str):
           LayoutBuilder(
             builder: (context, constraints) {
               final title = appLocalizations.allowLan;
-              final showIcon = DashboardSwitchRow.iconFits(
-                context,
-                width: constraints.maxWidth,
-                iconSize: row.icon,
-                padding: row.padding,
-                titles: [title],
-              );
+              final showIcon = constraints.maxWidth > 140;
               final lanSubtitle = switch (allowLanMode) {
                 TriOption.keep => '不修改 (运行: ${actualRunning ? "开启" : "关闭"})',
-                TriOption.enable => '开启 (运行: ${actualRunning ? "开启 · $effectivePort" : "未启动"})',
-                TriOption.disable => '关闭 (运行: 关闭)',
+                TriOption.enable => '开启 (运行: ${actualRunning ? "开启 · $runningPort" : "未启动"})',
+                TriOption.disable => '关闭 (运行: ${actualRunning ? "开启" : "关闭"})',
               };
-              return DashboardSwitchRow(
-                glyph: AppGlyphs.wifi,
-                title: title,
-                subtitle: lanSubtitle,
-                value: actualRunning,
-                iconSize: row.icon,
+              return DashboardBlock(
+                radius: row.radius,
                 padding: showIcon
                     ? row.padding
                     : row.padding.copyWith(left: row.titleStart),
-                radius: row.radius,
-                showIcon: showIcon,
                 onTap: showAllowLanMenu,
-                onChanged: (_) => showAllowLanMenu(),
+                semanticLabel: title,
+                child: Row(
+                  children: [
+                    if (showIcon)
+                      ShapeBadge(
+                        shape: MaterialShapes.cookie6Sided,
+                        color: actualRunning
+                            ? colorScheme.primary
+                            : colorScheme.surfaceContainerHighest,
+                        size: row.icon,
+                        child: CommonIcon(
+                          glyph: AppGlyphs.wifi,
+                          size: row.icon * 0.5,
+                          color: actualRunning
+                              ? colorScheme.onPrimary
+                              : colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    if (showIcon) const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(title, style: DashboardText.rowTitle(context)),
+                          const SizedBox(height: 2),
+                          Text(
+                            lanSubtitle,
+                            style: DashboardText.rowSubtitle(context),
+                          ),
+                        ],
+                      ),
+                    ),
+                    CommonIcon(
+                      glyph: AppGlyphs.arrowDropDown,
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  ],
+                ),
               );
             },
           ),
         ],
       ),
     );"""
-
-    content = apply_snippet_replacement(content, old_body, new_body, "Dashboard IntranetIpCard with WebUI & TriState allowLan")
+    content = apply_snippet_replacement(content, old_body, new_body, "Dashboard IntranetIpCard with WebUI & Dropdown allowLan")
 
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(content)
@@ -1246,7 +1664,7 @@ def patch_resources_view(src_dir: str):
                   ),
                 ListItem.toggle(
                   title: const Text('覆写资源链接'),
-                  subtitle: const Text('默认关闭（不修改）。开启后将使用下方配置的 URL 覆写订阅中的资源下载链接'),
+                  subtitle: const Text('开启后方可在此处自定义配置资源链接；关闭时优先使用配置文件中的链接'),
                   value: ref.watch(
                     patchClashConfigProvider.select(
                       (state) => state.generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl),
@@ -1281,6 +1699,184 @@ def patch_resources_view(src_dir: str):
             ),"""
         content = apply_snippet_replacement(content, old_sections, new_sections, "ResourcesView override switch and Smart section")
 
+        # Replace _GeoResourceItem with adaptive read-only/edit behavior
+        old_geo_item = """class _GeoResourceItem extends ConsumerWidget {
+  final GeoResource type;
+  final Map<String, FileInfo?> preloaded;
+
+  const _GeoResourceItem(this.type, {required this.preloaded});
+
+  Future<void> _updateUrl(
+    BuildContext context,
+    WidgetRef ref,
+    String url,
+  ) async {
+    final newUrl = await dialogs.showCommonDialog<String>(
+      child: UpdateGeoUrlFormDialog(
+        title: type.name,
+        url: url,
+        defaultValue: defaultGeoXUrl[type],
+      ),
+    );
+    if (newUrl != null && newUrl != url && context.mounted) {
+      try {
+        ref
+            .read(geoResourceActionProvider.notifier)
+            .updateGeoResourceUrl(type, newUrl);
+      } catch (e) {
+        unawaited(
+          dialogs.showAlert(
+            title: type.name,
+            message: TextSpan(text: e.toString()),
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isUpdating = ref.watch(isUpdatingProvider(type.updatingKey));
+    final url = ref.watch(
+      patchClashConfigProvider.select((state) => state.geoXUrl[type]),
+    );
+    return _FileInfoBuilder(
+      source: type,
+      updatingKey: type.updatingKey,
+      preloaded: preloaded,
+      load: () => _geoFileInfo(type),
+      builder: (context, fileInfo, pending) => _ResourceItem(
+        title: type.name,
+        url: url,
+        chip: fileInfo?.size.traffic.show,
+        lastUpdateTime: fileInfo?.lastModified,
+        pending: pending,
+        isUpdating: isUpdating,
+        onSync: () => ref
+            .read(geoResourceActionProvider.notifier)
+            .updateGeoResource(type),
+        onEdit: url == null ? null : () => _updateUrl(context, ref, url),
+      ),
+    );
+  }
+}"""
+
+        new_geo_item = """class _GeoResourceItem extends ConsumerWidget {
+  final GeoResource type;
+  final Map<String, FileInfo?> preloaded;
+
+  const _GeoResourceItem(this.type, {required this.preloaded});
+
+  String _getEffectiveUrl(WidgetRef ref) {
+    final isOverridden = ref.watch(
+      patchClashConfigProvider.select(
+        (state) => state.generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl),
+      ),
+    );
+    if (isOverridden) {
+      final custom = ref.watch(
+        patchClashConfigProvider.select((state) => state.geoXUrl[type]),
+      );
+      if (custom != null && custom.isNotEmpty) return custom;
+      return defaultGeoXUrl[type] ?? '';
+    } else {
+      final profileUrl = globalState.profileGeoXUrl.value?[type.name];
+      if (profileUrl != null && profileUrl.isNotEmpty) return profileUrl;
+      return defaultGeoXUrl[type] ?? '';
+    }
+  }
+
+  Future<void> _handleTap(BuildContext context, WidgetRef ref, String effectiveUrl) async {
+    final isOverridden = ref.read(
+      patchClashConfigProvider.select(
+        (state) => state.generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl),
+      ),
+    );
+    if (!isOverridden) {
+      await dialogs.showCommonDialog<void>(
+        child: CommonDialog(
+          title: Text(type.name),
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SelectableText(
+                effectiveUrl,
+                style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                '提示：「覆写资源链接」未开启，当前为只读展示。如需自定义修改链接，请先在上方开启「覆写资源链接」开关。',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: effectiveUrl));
+                      if (context.mounted) {
+                        Navigator.of(context).pop();
+                        context.showNotifier('已复制链接到剪贴板');
+                      }
+                    },
+                    child: const Text('复制链接'),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('关闭'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+      return;
+    }
+
+    final currentCustom = ref.read(patchClashConfigProvider).geoXUrl[type] ?? defaultGeoXUrl[type] ?? '';
+    final newUrl = await dialogs.showCommonDialog<String>(
+      child: UpdateGeoUrlFormDialog(
+        title: type.name,
+        url: currentCustom,
+        defaultValue: defaultGeoXUrl[type],
+      ),
+    );
+    if (newUrl != null && newUrl != currentCustom && context.mounted) {
+      ref.read(geoResourceActionProvider.notifier).updateGeoResourceUrl(type, newUrl);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isUpdating = ref.watch(isUpdatingProvider(type.updatingKey));
+    final url = _getEffectiveUrl(ref);
+    return _FileInfoBuilder(
+      source: type,
+      updatingKey: type.updatingKey,
+      preloaded: preloaded,
+      load: () => _geoFileInfo(type),
+      builder: (context, fileInfo, pending) => _ResourceItem(
+        title: type.name,
+        url: url,
+        chip: fileInfo?.size.traffic.show,
+        lastUpdateTime: fileInfo?.lastModified,
+        pending: pending,
+        isUpdating: isUpdating,
+        onSync: () => ref
+            .read(geoResourceActionProvider.notifier)
+            .updateGeoResource(type),
+        onEdit: () => _handleTap(context, ref, url),
+      ),
+    );
+  }
+}"""
+        content = apply_snippet_replacement(content, old_geo_item, new_geo_item, "Adaptive _GeoResourceItem with read-only/edit dialogs")
+
         # Add helper function _smartModelFileInfo and class _SmartModelResourceItem
         smart_item_code = """
 Future<FileInfo?> _smartModelFileInfo() async {
@@ -1288,52 +1884,106 @@ Future<FileInfo?> _smartModelFileInfo() async {
   return File(join(homePath, 'Model.bin')).getFileInfo();
 }
 
-class _SmartModelResourceItem extends ConsumerStatefulWidget {
+class _SmartModelResourceItem extends ConsumerWidget {
   final Map<String, FileInfo?> preloaded;
 
   const _SmartModelResourceItem({required this.preloaded});
 
-  @override
-  ConsumerState<_SmartModelResourceItem> createState() => _SmartModelResourceItemState();
-}
-
-class _SmartModelResourceItemState extends ConsumerState<_SmartModelResourceItem> {
-  String? _url;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadUrl();
+  String _getEffectiveUrl(WidgetRef ref) {
+    final isOverridden = ref.watch(
+      patchClashConfigProvider.select(
+        (state) => state.generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl),
+      ),
+    );
+    if (isOverridden) {
+      final custom = preferences.getSmartModelUrlSync();
+      if (custom.isNotEmpty) return custom;
+      return defaultSmartModelUrl;
+    } else {
+      final profileUrl = globalState.profileLgbmUrl.value;
+      if (profileUrl != null && profileUrl.isNotEmpty) return profileUrl;
+      return defaultSmartModelUrl;
+    }
   }
 
-  Future<void> _loadUrl() async {
-    final url = await preferences.getSmartModelUrl();
-    if (mounted) setState(() => _url = url);
-  }
+  Future<void> _handleTap(BuildContext context, WidgetRef ref, String effectiveUrl) async {
+    final isOverridden = ref.read(
+      patchClashConfigProvider.select(
+        (state) => state.generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl),
+      ),
+    );
+    if (!isOverridden) {
+      await dialogs.showCommonDialog<void>(
+        child: CommonDialog(
+          title: const Text('MODEL (LightGBM)'),
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SelectableText(
+                effectiveUrl,
+                style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                '提示：「覆写资源链接」未开启，当前为只读展示。如需自定义修改链接，请先在上方开启「覆写资源链接」开关。',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: effectiveUrl));
+                      if (context.mounted) {
+                        Navigator.of(context).pop();
+                        context.showNotifier('已复制链接到剪贴板');
+                      }
+                    },
+                    child: const Text('复制链接'),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('关闭'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+      return;
+    }
 
-  Future<void> _updateUrl(BuildContext context) async {
-    final currentUrl = _url ?? defaultSmartModelUrl;
+    final currentCustom = preferences.getSmartModelUrlSync().isNotEmpty
+        ? preferences.getSmartModelUrlSync()
+        : defaultSmartModelUrl;
     final newUrl = await dialogs.showCommonDialog<String>(
       child: UpdateGeoUrlFormDialog(
-        title: 'MODEL',
-        url: currentUrl,
+        title: 'MODEL (LightGBM)',
+        url: currentCustom,
         defaultValue: defaultSmartModelUrl,
       ),
     );
-    if (newUrl != null && newUrl != currentUrl && mounted) {
+    if (newUrl != null && newUrl != currentCustom && context.mounted) {
       await preferences.setSmartModelUrl(newUrl);
-      setState(() => _url = newUrl);
+      if (context.mounted) {
+        (context as Element).markNeedsBuild();
+      }
     }
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final isUpdating = ref.watch(isUpdatingProvider('smart_model'));
-    final url = _url ?? defaultSmartModelUrl;
+    final url = _getEffectiveUrl(ref);
     return _FileInfoBuilder(
       source: 'smart_model',
       updatingKey: 'smart_model',
-      preloaded: widget.preloaded,
+      preloaded: preloaded,
       load: () => _smartModelFileInfo(),
       builder: (context, fileInfo, pending) => _ResourceItem(
         title: 'MODEL',
@@ -1343,7 +1993,7 @@ class _SmartModelResourceItemState extends ConsumerState<_SmartModelResourceItem
         pending: pending,
         isUpdating: isUpdating,
         onSync: () => ref.read(resourcesActionProvider.notifier).updateSmartModel(),
-        onEdit: () => _updateUrl(context),
+        onEdit: () => _handleTap(context, ref, url),
       ),
     );
   }
@@ -1364,7 +2014,13 @@ class _SmartModelResourceItemState extends ConsumerState<_SmartModelResourceItem
     final updatingKeys = ref.read(updatingKeysProvider.notifier);
     final op = updatingKeys.start('smart_model');
     try {
-      final url = await preferences.getSmartModelUrl();
+      final overrideGeo = ref.read(patchClashConfigProvider).generalOverrideKeys.contains(GeneralOverrideKey.geoXUrl);
+      final customUrl = await preferences.getSmartModelUrl();
+      final profileUrl = globalState.profileLgbmUrl.value;
+      final url = overrideGeo
+          ? (customUrl.isNotEmpty ? customUrl : defaultSmartModelUrl)
+          : (profileUrl != null && profileUrl.isNotEmpty ? profileUrl : defaultSmartModelUrl);
+
       final homePath = await appPath.homeDirPath;
       final targetFile = File(join(homePath, 'Model.bin'));
       final tmpFile = File(join(homePath, 'Model.bin.download'));
@@ -1440,6 +2096,7 @@ def main():
     patch_task_dart(src_dir)
     patch_setup_dart(src_dir)
     patch_widgets_config_item(src_dir)
+    patch_proxy_helpers(src_dir)
     patch_general_views(src_dir)
     patch_dashboard_intranet_ip(src_dir)
     patch_resources_view(src_dir)
