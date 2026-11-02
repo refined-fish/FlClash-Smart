@@ -288,7 +288,26 @@ const defaultSmartModelUrl =
                                   "geoUpdateInterval: (json['geo-update-interval'] as num?)?.toInt() ?? 168,")
         content = content.replace("generalOverrideKeys: json['general-override-keys'] == null\n          ? const {}",
                                   "generalOverrideKeys: json['general-override-keys'] == null\n          ? const {GeneralOverrideKey.allowLan}")
-        with open(clash_g_path, "w", encoding="utf-8", newline="") as f:
+        old_enum_map = """const _$GeneralOverrideKeyEnumMap = {
+  GeneralOverrideKey.testUrl: 'test-url',
+  GeneralOverrideKey.unifiedDelay: 'unified-delay',
+  GeneralOverrideKey.tcpConcurrent: 'tcp-concurrent',
+  GeneralOverrideKey.ipv6: 'ipv6',
+  GeneralOverrideKey.geodataLoader: 'geodata-loader',
+};"""
+        new_enum_map = """const _$GeneralOverrideKeyEnumMap = {
+  GeneralOverrideKey.testUrl: 'test-url',
+  GeneralOverrideKey.unifiedDelay: 'unified-delay',
+  GeneralOverrideKey.tcpConcurrent: 'tcp-concurrent',
+  GeneralOverrideKey.ipv6: 'ipv6',
+  GeneralOverrideKey.geodataLoader: 'geodata-loader',
+  GeneralOverrideKey.allowLan: 'allow-lan',
+  GeneralOverrideKey.geoXUrl: 'geox-url',
+  GeneralOverrideKey.externalController: 'external-controller',
+  GeneralOverrideKey.findProcessMode: 'find-process-mode',
+};"""
+        content = apply_snippet_replacement(content, old_enum_map, new_enum_map, "Extend _$GeneralOverrideKeyEnumMap in clash_config.g.dart")
+        with open(clash_g_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
         print("[+] Patched clash_config.g.dart defaults")
 
